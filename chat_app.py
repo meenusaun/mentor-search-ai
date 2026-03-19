@@ -3,7 +3,18 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-st.title("🔍 AI Mentor Search")
+st.set_page_config(
+    page_title="Resources Network - Look for Mentor",
+    page_icon="🔍",
+    layout="wide"
+)
+
+col1, col2, col3 = st.columns([1,2,1])
+
+with col1:
+    st.image("DP_BG1.png", width=150)
+
+st.title("🌐 Resources Network - Look for Mentor")
 
 # ------------------ LOAD DATA ------------------
 @st.cache_data
