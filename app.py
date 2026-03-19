@@ -63,8 +63,7 @@ if query:
 
     display_df.rename(columns={
     "score": "Match Score",
-    "LinkedIn": "LinkedIn Profile",
-    "Short Description": "Description"
+    "LinkedIn": "LinkedIn Profile"
     }, inplace=True)
 
     # Convert LinkedIn to clickable links
@@ -76,9 +75,20 @@ if query:
     if "LinkedIn Profile" in display_df.columns:
         display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].apply(make_clickable)
 
-    columns_to_show = ["Name", "Expertise", "Industry", "Description", "LinkedIn Profile", "Match Score"]
+    columns_to_show = ["Name", "Expertise", "Industry", "Short Description", "LinkedIn Profile", "Match Score"]
     display_df = display_df[[col for col in columns_to_show if col in display_df.columns]]
     
+    st.subheader("View Full Description")
+
+    selected_name = st.selectbox(
+    "Select a mentor",
+    display_df["Name"]
+    )
+
+    if selected_name:
+        full_desc = df[df["Name"] == selected_name]["Description"].values[0]
+        st.write(full_desc)
+
     st.subheader("Top Matches:")
 
     st.write(
