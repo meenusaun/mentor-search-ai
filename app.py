@@ -61,9 +61,9 @@ if query:
 
     # Convert LinkedIn to clickable links
     def make_clickable(link):
-        if pd.notna(link):
+        if pd.notna(link) and link != "":
             return f'<a href="{link}" target="_blank">View Profile</a>'
-        return ""
+        return "Not Available"
 
     display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].apply(make_clickable)
 
