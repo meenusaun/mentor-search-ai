@@ -99,6 +99,7 @@ if user_input:
     st.subheader("Top Matches")
 
     display_df = results.copy()
+    display_df["row_id"] = display_df.index
 
     # Rename columns
     display_df.rename(columns={
