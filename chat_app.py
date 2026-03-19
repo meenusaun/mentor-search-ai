@@ -144,11 +144,14 @@ if user_input:
         display_df["Name"]
     )
 
-    if selected_name:
-        full_desc_list = df[df["Name"] == selected_name]["Description"].values
+    selected_rows = df[df["Name"] == selected_name]
 
-        if len(full_desc_list) > 0:
-            st.info(full_desc_list[0])
+    if not selected_rows.empty:
+        full_desc = selected_rows.iloc[0]["Description"]
+    
+        if isinstance(full_desc, str) and full_desc.strip() != "":
+            st.info(full_desc)
         else:
             st.warning("Description not available")
-            st.info(full_desc_list)
+    else:
+        st.warning("Mentor not found")
