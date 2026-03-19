@@ -3,3 +3,4 @@ pandas
 openpyxl
 scikit-learn
 sentence-transformers
+openai
