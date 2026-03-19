@@ -47,12 +47,12 @@ if query:
 
     st.subheader("Top Matches:")
 
-    for _, row in results.iterrows():
-        st.markdown(f"### {row['Name']}")
-        st.write(f"Expertise: {row['Expertise']}")
-        st.write(f"Industry: {row['Industry']}")
-        st.write(f"Match Score: {round(row['score'], 2)}")
-        st.write("Why this mentor:")
-        st.write(f"- Matches expertise: {row['Expertise']}")
-        st.write(f"- Relevant industry: {row['Industry']}")
-        st.write("---")
+    # Create clean table
+    display_df = results[["Name", "Expertise", "Industry", "score"]].copy()
+    display_df.rename(columns={"score": "Match Score"}, inplace=True)
+
+    # Round score
+    display_df["Match Score"] = display_df["Match Score"].round(2)
+
+    st.subheader("Top Matches:")
+    st.dataframe(display_df, use_container_width=True)
