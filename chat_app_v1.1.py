@@ -84,15 +84,8 @@ if user_input:
         results = filtered_df.sort_values(by="score", ascending=False).head(5)
 
     # -------- CHAT RESPONSE --------
-    response = "Here are the best mentors for you:\n\n"
-
-    for _, row in results.iterrows():
-        response += f"👉 {row['Name']} ({row['Expertise']})\n"
-
     with st.chat_message("assistant"):
-        st.write(response)
-
-    st.session_state.messages.append({"role": "assistant", "content": response})
+        st.write("Here are the best mentors based on your requirement:")
 
     # ------------------ TABLE DISPLAY ------------------
     st.subheader("Top Matches")
