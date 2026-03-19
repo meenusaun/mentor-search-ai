@@ -75,4 +75,3 @@ if query:
     )
 
     st.subheader("Top Matches:")
-    st.dataframe(display_df, use_container_width=True)
