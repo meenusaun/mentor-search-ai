@@ -9,6 +9,12 @@ st.title("🔍 AI Mentor Search")
 @st.cache_data
 def load_data():
     df = pd.read_excel("mentors.xlsx", engine="openpyxl")
+    # Fill missing values safely
+    df["Expertise"] = df["Expertise"].fillna("").astype(str)
+    df["Industry"] = df["Industry"].fillna("").astype(str)
+    df["Description"] = df["Description"].fillna("").astype(str)
+
+    # Combine text
     df["combined"] = df["Expertise"] + " " + df["Industry"] + " " + df["Description"]
     return df
 
@@ -101,7 +107,7 @@ if user_input:
         return "Not Available"
 
     if "LinkedIn Profile" in display_df.columns:
-        display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].apply(make_clickable)
+        display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].fillna("").astype(str).apply(make_clickable)
 
     # Select columns
     columns_to_show = ["Name", "Expertise", "Industry", "Short Description", "LinkedIn Profile", "Match Score"]
@@ -122,5 +128,10 @@ if user_input:
     )
 
     if selected_name:
-        full_desc = df[df["Name"] == selected_name]["Description"].values[0]
-        st.info(full_desc)
+        full_desc_list = df[df["Name"] == selected_name]["Description"].values
+
+        if len(full_desc_list) > 0:
+            st.info(full_desc_list[0])
+        else:
+            st.warning("Description not available")
+            st.info(full_desc_list)
