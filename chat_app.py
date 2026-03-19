@@ -2,11 +2,10 @@ import streamlit as st
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-import anthropic
+from openai import OpenAI
 
-client = anthropic.Anthropic(
-    api_key=st.secrets["ANTHROPIC_API_KEY"]
-)
+# ------------------ OPENAI ------------------
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ------------------ PAGE CONFIG ------------------
 st.set_page_config(
@@ -41,7 +40,15 @@ def load_data():
     df["Expertise Tags"] = df["Expertise Tags"].fillna("").astype(str)
     df["Industry Tags"] = df["Industry Tags"].fillna("").astype(str)
 
-    df["combined"] = df["Expertise"] + " " + df["Secondary Expertise"] + " " + df["Industry"] + " " + df["Secondary Industry"] + " " + df["Description"] + " " + df["Expertise Tags"] + " " + df["Industry Tags"]
+    df["combined"] = (
+        "Expertise: " + df["Expertise"] + ". " +
+        "Secondary Expertise: " + df["Secondary Expertise"] + ". " +
+        "Industry: " + df["Industry"] + ". " +
+        "Secondary Industry: " + df["Secondary Industry"] + ". " +
+        "Description: " + df["Description"] + ". " +
+        "Tags: " + df["Expertise Tags"] + " " + df["Industry Tags"]
+    )
+
     return df
 
 df = load_data()
@@ -49,7 +56,7 @@ df = load_data()
 # ------------------ LOAD MODEL ------------------
 @st.cache_resource
 def load_model():
-    return SentenceTransformer('paraphrase-MiniLM-L3-v2')
+    return SentenceTransformer('all-MiniLM-L6-v2')  # upgraded
 
 model = load_model()
 
@@ -92,41 +99,37 @@ if user_input:
     else:
         results = filtered_df.sort_values(by="score", ascending=False).head(5)
 
-    # -------- AI RECOMMENDATION --------
-
+    # -------- AI RECOMMENDATION (CHATGPT) --------
     mentor_info = ""
 
     for _, row in results.iterrows():
         mentor_info += f"""
-    Name: {row['Name']}
-    Expertise: {row['Expertise']}
-    Industry: {row['Industry']}
-    Description: {row['Description']}
-    """
+Name: {row['Name']}
+Expertise: {row['Expertise']}
+Industry: {row['Industry']}
+Description: {row['Description']}
+"""
 
     prompt = f"""
-    User is looking for a mentor: "{user_input}"
+User is looking for a mentor: "{user_input}"
 
-    Here are some mentors:
+Here are some mentors:
 
-    {mentor_info}
+{mentor_info}
 
-    Task:
-    1. Recommend top 3 mentors
-    2. Explain WHY each is suitable
-    3. Keep response simple and structured
-    """
+Task:
+1. Recommend top 3 mentors
+2. Explain WHY each is suitable
+3. Keep response simple and structured
+"""
 
     try:
-        response_ai = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=500,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
+        response_ai = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
         )
 
-        ai_output = response_ai.content[0].text
+        ai_output = response_ai.choices[0].message.content
 
         st.markdown("### 🤖 AI Recommendation")
 
@@ -136,23 +139,20 @@ if user_input:
         st.session_state.messages.append({"role": "assistant", "content": ai_output})
 
     except Exception as e:
-        st.error(e)
+        st.error(f"OpenAI Error: {e}")
 
     # ------------------ TABLE DISPLAY ------------------
     st.subheader("Top Matches")
 
     display_df = results.copy()
 
-    # Rename columns
     display_df.rename(columns={
         "score": "Match Score",
         "LinkedIn": "LinkedIn Profile"
     }, inplace=True)
 
-    # Round score
     display_df["Match Score"] = display_df["Match Score"].round(2)
 
-    # Short description
     def shorten_text(text, length=100):
         if isinstance(text, str) and len(text) > length:
             return text[:length] + "..."
@@ -160,7 +160,6 @@ if user_input:
 
     display_df["Short Description"] = display_df["Description"].apply(shorten_text)
 
-    # Clickable LinkedIn
     def make_clickable(link):
         if pd.notna(link) and link != "":
             return f'<a href="{link}" target="_blank">View Profile</a>'
@@ -169,11 +168,9 @@ if user_input:
     if "LinkedIn Profile" in display_df.columns:
         display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].fillna("").astype(str).apply(make_clickable)
 
-    # Select columns
     columns_to_show = ["Name", "Expertise", "Industry", "Short Description", "LinkedIn Profile", "Match Score"]
     display_df = display_df[[col for col in columns_to_show if col in display_df.columns]]
 
-    # Show table
     st.write(
         display_df.to_html(escape=False, index=False),
         unsafe_allow_html=True
