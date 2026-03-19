@@ -51,12 +51,20 @@ if query:
     display_df = results.copy()
     display_df.rename(columns={"score": "Match Score"}, inplace=True)
 
+    def shorten_text(text, length=100):
+        if isinstance(text, str) and len(text) > length:
+            return text[:length] + "..."
+        return text
+
+    display_df["Short Description"] = display_df["Description"].apply(shorten_text)
+
     # Round score
     display_df["Match Score"] = display_df["Match Score"].round(2)
 
     display_df.rename(columns={
     "score": "Match Score",
-    "LinkedIn": "LinkedIn Profile"
+    "LinkedIn": "LinkedIn Profile",
+    "Short Description": "Description"
     }, inplace=True)
 
     # Convert LinkedIn to clickable links
@@ -68,7 +76,7 @@ if query:
     if "LinkedIn Profile" in display_df.columns:
         display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].apply(make_clickable)
 
-    columns_to_show = ["Name", "Expertise", "Industry", "Description", "LinkedIn Profile", "Match Score"]
+    columns_to_show = ["Name", "Expertise", "Industry", "Short Description", "LinkedIn Profile", "Match Score"]
     display_df = display_df[[col for col in columns_to_show if col in display_df.columns]]
     
     st.subheader("Top Matches:")
