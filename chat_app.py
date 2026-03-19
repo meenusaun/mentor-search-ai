@@ -12,7 +12,9 @@ st.set_page_config(
 )
 
 # ------------------ OPENAI ------------------
-client = OpenAI(api_key="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")  # 👈 Replace this
+client = OpenAI(api_key="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",
+                organization=None
+            )  # 👈 Replace this
 
 # ------------------ HEADER ------------------
 col1, col2, col3 = st.columns([1,2,1])
