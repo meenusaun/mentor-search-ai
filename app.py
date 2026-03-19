@@ -48,11 +48,31 @@ if query:
     st.subheader("Top Matches:")
 
     # Create clean table
-    display_df = results[["Name", "Expertise", "Industry", "score"]].copy()
+    display_df = results[["Name", "Expertise", "Industry", "Description", "LinkedIn", "score"]].copy()
     display_df.rename(columns={"score": "Match Score"}, inplace=True)
 
     # Round score
     display_df["Match Score"] = display_df["Match Score"].round(2)
+
+    display_df.rename(columns={
+    "score": "Match Score",
+    "LinkedIn": "LinkedIn Profile"
+    }, inplace=True)
+
+    # Convert LinkedIn to clickable links
+    def make_clickable(link):
+        if pd.notna(link):
+            return f'<a href="{link}" target="_blank">View Profile</a>'
+        return ""
+
+    display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].apply(make_clickable)
+
+    st.subheader("Top Matches:")
+
+    st.write(
+        display_df.to_html(escape=False, index=False),
+        unsafe_allow_html=True
+    )
 
     st.subheader("Top Matches:")
     st.dataframe(display_df, use_container_width=True)
