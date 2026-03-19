@@ -3,6 +3,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
+# ------------------ PAGE CONFIG ------------------
 st.set_page_config(
     page_title="Resources Network - Look for Mentor",
     page_icon="🔍",
@@ -14,7 +15,7 @@ col1, col2, col3 = st.columns([1,2,1])
 with col1:
     st.image("DP_BG1.png", width=150)
 
-st.write("")  # adds spacing
+st.write("")
 
 with col2:
     st.markdown(
@@ -26,13 +27,16 @@ with col2:
 @st.cache_data
 def load_data():
     df = pd.read_excel("mentors.xlsx", engine="openpyxl")
-    # Fill missing values safely
-    df["Expertise"] = df["Expertise"].fillna("").astype(str)
-    df["Industry"] = df["Industry"].fillna("").astype(str)
-    df["Description"] = df["Description"].fillna("").astype(str)
 
-    # Combine text
-    df["combined"] = df["Expertise"] + " " + df["Industry"] + " " + df["Description"]
+    df["Expertise"] = df["Expertise"].fillna("").astype(str)
+    df["Secondary Expertise"] = df["Secondary Expertise"].fillna("").astype(str)
+    df["Industry"] = df["Industry"].fillna("").astype(str)
+    df["Secondary Industry"] = df["Secondary Industry"].fillna("").astype(str)
+    df["Description"] = df["Description"].fillna("").astype(str)
+    df["Expertise Tags"] = df["Expertise Tags"].fillna("").astype(str)
+    df["Industry Tags"] = df["Industry Tags"].fillna("").astype(str)
+
+    df["combined"] = df["Expertise"] + " " + df["Secondary Expertise"] + " " + df["Industry"] + " " + df["Secondary Industry"] + " " + df["Description"] + " " + df["Expertise Tags"] + " " + df["Industry Tags"]
     return df
 
 df = load_data()
@@ -55,7 +59,6 @@ vectors = get_vectors(df["combined"])
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Show previous messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
@@ -85,21 +88,13 @@ if user_input:
         results = filtered_df.sort_values(by="score", ascending=False).head(5)
 
     # -------- CHAT RESPONSE --------
-    response = "Here are the best mentors for you:\n\n"
-
-    for _, row in results.iterrows():
-        response += f"👉 {row['Name']} ({row['Expertise']})\n"
-
     with st.chat_message("assistant"):
-        st.write(response)
+        st.write("Here are the best mentors based on your requirement:")
 
-    st.session_state.messages.append({"role": "assistant", "content": response})
-
-    # -------- TABLE DISPLAY --------
+    # ------------------ TABLE DISPLAY ------------------
     st.subheader("Top Matches")
 
     display_df = results.copy()
-    display_df["row_id"] = display_df.index
 
     # Rename columns
     display_df.rename(columns={
@@ -137,22 +132,18 @@ if user_input:
         unsafe_allow_html=True
     )
 
-    # -------- FULL DESCRIPTION --------
-    st.subheader("View Full Description")
+    # ------------------ VIEW DETAILS ------------------
+    st.subheader("View Mentor Details")
 
-    selected_name = st.selectbox(
-        "Select a mentor",
-        display_df["Name"]
-    )
+    for idx, row in results.iterrows():
 
-    selected_rows = df[df["Name"] == selected_name]
+        with st.expander(f"{row['Name']} ({row['Expertise']})"):
+            st.write(f"**Industry:** {row['Industry']}")
 
-    if not selected_rows.empty:
-        full_desc = selected_rows.iloc[0]["Description"]
-    
-        if isinstance(full_desc, str) and full_desc.strip() != "":
-            st.info(full_desc)
-        else:
-            st.warning("Description not available")
-    else:
-        st.warning("Mentor not found")
+            if row["Description"]:
+                st.write(row["Description"])
+            else:
+                st.warning("Description not available")
+
+            if pd.notna(row.get("LinkedIn", "")) and row.get("LinkedIn", "") != "":
+                st.markdown(f"[🔗 View LinkedIn Profile]({row['LinkedIn']})")
