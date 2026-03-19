@@ -3,6 +3,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
+# ------------------ PAGE CONFIG ------------------
 st.set_page_config(
     page_title="Resources Network - Look for Mentor",
     page_icon="🔍",
@@ -64,6 +65,7 @@ user_input = st.chat_input("Ask me to find a mentor...")
 # ------------------ PROCESS INPUT ------------------
 if user_input:
 
+    # Show user message
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.write(user_input)
@@ -92,29 +94,59 @@ if user_input:
 
     st.session_state.messages.append({"role": "assistant", "content": response})
 
-    # -------- CARD STYLE DISPLAY --------
+    # ------------------ TABLE DISPLAY ------------------
     st.subheader("Top Matches")
+
+    display_df = results.copy()
+
+    # Rename columns
+    display_df.rename(columns={
+        "score": "Match Score",
+        "LinkedIn": "LinkedIn Profile"
+    }, inplace=True)
+
+    # Round score
+    display_df["Match Score"] = display_df["Match Score"].round(2)
+
+    # Short description
+    def shorten_text(text, length=100):
+        if isinstance(text, str) and len(text) > length:
+            return text[:length] + "..."
+        return text
+
+    display_df["Short Description"] = display_df["Description"].apply(shorten_text)
+
+    # Clickable LinkedIn
+    def make_clickable(link):
+        if pd.notna(link) and link != "":
+            return f'<a href="{link}" target="_blank">View Profile</a>'
+        return "Not Available"
+
+    if "LinkedIn Profile" in display_df.columns:
+        display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].fillna("").astype(str).apply(make_clickable)
+
+    # Select columns
+    columns_to_show = ["Name", "Expertise", "Industry", "Short Description", "LinkedIn Profile", "Match Score"]
+    display_df = display_df[[col for col in columns_to_show if col in display_df.columns]]
+
+    # Show table
+    st.write(
+        display_df.to_html(escape=False, index=False),
+        unsafe_allow_html=True
+    )
+
+    # ------------------ VIEW DETAILS ------------------
+    st.subheader("View Mentor Details")
 
     for idx, row in results.iterrows():
 
-        st.markdown(f"### {row['Name']}")
-        st.write(f"**Expertise:** {row['Expertise']}")
-        st.write(f"**Industry:** {row['Industry']}")
+        with st.expander(f"{row['Name']} ({row['Expertise']})"):
+            st.write(f"**Industry:** {row['Industry']}")
 
-        # Short description
-        short_desc = row["Description"][:120] + "..." if row["Description"] else ""
-        st.write(f"**Description:** {short_desc}")
-
-        # View Details button
-        if st.button(f"View Details - {idx}"):
-            full_desc = row["Description"]
-            if full_desc:
-                st.info(full_desc)
+            if row["Description"]:
+                st.write(row["Description"])
             else:
                 st.warning("Description not available")
 
-        # LinkedIn
-        if pd.notna(row.get("LinkedIn", "")) and row.get("LinkedIn", "") != "":
-            st.markdown(f"[🔗 View LinkedIn Profile]({row['LinkedIn']})")
-
-        st.write("---")
+            if pd.notna(row.get("LinkedIn", "")) and row.get("LinkedIn", "") != "":
+                st.markdown(f"[🔗 View LinkedIn Profile]({row['LinkedIn']})")
