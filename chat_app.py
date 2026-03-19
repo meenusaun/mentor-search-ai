@@ -5,8 +5,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 
 # ------------------ OPENAI ------------------
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+import os
+from openai import OpenAI
 
+os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+
+client = OpenAI()
 # ------------------ PAGE CONFIG ------------------
 st.set_page_config(
     page_title="Resources Network - Look for Mentor",
