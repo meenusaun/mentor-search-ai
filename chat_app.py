@@ -14,7 +14,13 @@ col1, col2, col3 = st.columns([1,2,1])
 with col1:
     st.image("DP_BG1.png", width=150)
 
-st.title("🌐 Resources Network - Look for Mentor")
+st.write("")  # adds spacing
+
+with col2:
+    st.markdown(
+        "<h2 style='text-align: center;'>🌐 Resources Network - Look for Mentor</h2>",
+        unsafe_allow_html=True
+    )
 
 # ------------------ LOAD DATA ------------------
 @st.cache_data
