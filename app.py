@@ -76,7 +76,7 @@ if query:
     if "LinkedIn Profile" in display_df.columns:
         display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].apply(make_clickable)
 
-    columns_to_show = ["Name", "Expertise", "Industry", "Short Description", "LinkedIn Profile", "Match Score"]
+    columns_to_show = ["Name", "Expertise", "Industry", "Description", "LinkedIn Profile", "Match Score"]
     display_df = display_df[[col for col in columns_to_show if col in display_df.columns]]
     
     st.subheader("Top Matches:")
