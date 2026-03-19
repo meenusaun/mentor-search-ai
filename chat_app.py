@@ -136,7 +136,7 @@ if user_input:
         st.session_state.messages.append({"role": "assistant", "content": ai_output})
 
     except Exception as e:
-        st.warning("AI recommendation not available. Showing basic results.")
+        st.error(e)
 
     # ------------------ TABLE DISPLAY ------------------
     st.subheader("Top Matches")
