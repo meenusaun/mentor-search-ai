@@ -29,10 +29,14 @@ def load_data():
     df = pd.read_excel("mentors.xlsx", engine="openpyxl")
 
     df["Expertise"] = df["Expertise"].fillna("").astype(str)
+    df["Secondary Expertise"] = df["Secondary Expertise"].fillna("").astype(str)
     df["Industry"] = df["Industry"].fillna("").astype(str)
+    df["Secondary Industry"] = df["Secondary Industry"].fillna("").astype(str)
     df["Description"] = df["Description"].fillna("").astype(str)
+    df["Expertise Tags"] = df["Expertise Tags"].fillna("").astype(str)
+    df["Industry Tags"] = df["Industry Tags"].fillna("").astype(str)
 
-    df["combined"] = df["Expertise"] + " " + df["Industry"] + " " + df["Description"]
+    df["combined"] = df["Expertise"] + " " + df["Secondary Expertise"] + " " + df["Industry"] + " " + df["Secondary Industry"] + " " + df["Description"] + " " + df["Expertise Tags"] + " " + df["Industry Tags"]
     return df
 
 df = load_data()
