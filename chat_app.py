@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 # ------------------ OPENAI ------------------
-client = OpenAI(api_key="YOUR_API_KEY")  # 👈 Replace this
+client = OpenAI(api_key="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")  # 👈 Replace this
 
 # ------------------ HEADER ------------------
 col1, col2, col3 = st.columns([1,2,1])
@@ -118,12 +118,12 @@ Task:
 """
 
     try:
-        response_ai = client.chat.completions.create(
+        response_ai = client.responses.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
+            input=prompt
         )
 
-        ai_output = response_ai.choices[0].message.content
+        ai_output = response_ai.output[0].content[0].text
 
         with st.chat_message("assistant"):
             st.write(ai_output)
@@ -131,7 +131,7 @@ Task:
         st.session_state.messages.append({"role": "assistant", "content": ai_output})
 
     except Exception as e:
-        st.warning("ChatGPT response failed. Showing basic results.")
+        st.error(f"OpenAI Error: {e}")
 
     # ------------------ TABLE ------------------
     st.subheader("Top Matches")
