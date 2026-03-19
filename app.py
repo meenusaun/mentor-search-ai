@@ -48,7 +48,7 @@ if query:
     st.subheader("Top Matches:")
 
     # Create clean table
-    display_df = results[["Name", "Expertise", "Industry", "Description", "LinkedIn", "score"]].copy()
+    display_df = results.copy()
     display_df.rename(columns={"score": "Match Score"}, inplace=True)
 
     # Round score
@@ -65,8 +65,12 @@ if query:
             return f'<a href="{link}" target="_blank">View Profile</a>'
         return "Not Available"
 
-    display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].apply(make_clickable)
+    if "LinkedIn Profile" in display_df.columns:
+        display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].apply(make_clickable)
 
+    columns_to_show = ["Name", "Expertise", "Industry", "Description", "LinkedIn Profile", "Match Score"]
+    display_df = display_df[[col for col in columns_to_show if col in display_df.columns]]
+    
     st.subheader("Top Matches:")
 
     st.write(
