@@ -5,3 +5,6 @@ scikit-learn
 sentence-transformers
 openai
 anthropic
+pdfplumber
+python-docx
+requests
