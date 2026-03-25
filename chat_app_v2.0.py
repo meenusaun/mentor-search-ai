@@ -5,6 +5,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
 import anthropic
 import os
+import pdfplumber
+import docx
+import requests
+from io import BytesIO
 
 # ------------------ CLIENTS ------------------
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
@@ -18,20 +22,17 @@ st.set_page_config(
     layout="wide"
 )
 
-col1, col2, col3 = st.columns([1,2,1])
-
+col1, col2, col3 = st.columns([1, 2, 1])
 with col1:
     st.image("DP_BG1.png", width=150)
-
 st.write("")
-
 with col2:
     st.markdown(
         "<h2 style='text-align: center;'>🌐 Resources Network - Look for Mentor</h2>",
         unsafe_allow_html=True
     )
 
-# ------------------ AI MODEL SELECTOR (Sidebar) ------------------
+# ------------------ SIDEBAR ------------------
 st.sidebar.title("⚙️ Settings")
 ai_model = st.sidebar.radio(
     "Choose AI Model for Recommendations:",
@@ -44,26 +45,105 @@ if ai_model == "GPT-4o Mini (OpenAI)":
 else:
     st.sidebar.info("Using **Anthropic Claude** for recommendations.")
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("📄 Upload Your Profile (Optional)")
+user_uploaded_file = st.sidebar.file_uploader(
+    "Upload your resume or requirements doc",
+    type=["pdf", "docx", "txt"],
+    help="Upload a PDF, Word doc, or text file. This will help find better mentor matches for you."
+)
+
+# ------------------ DOCUMENT EXTRACTION UTILS ------------------
+def extract_text_from_pdf_bytes(file_bytes):
+    """Extract text from PDF bytes using pdfplumber."""
+    text = ""
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+    except Exception as e:
+        text = f"[PDF extraction error: {e}]"
+    return text.strip()
+
+def extract_text_from_docx_bytes(file_bytes):
+    """Extract text from DOCX bytes."""
+    text = ""
+    try:
+        doc = docx.Document(BytesIO(file_bytes))
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+    except Exception as e:
+        text = f"[DOCX extraction error: {e}]"
+    return text.strip()
+
+def extract_text_from_uploaded_file(uploaded_file):
+    """Extract text from a Streamlit uploaded file."""
+    if uploaded_file is None:
+        return ""
+    file_bytes = uploaded_file.read()
+    uploaded_file.seek(0)  # reset pointer
+    if uploaded_file.type == "application/pdf":
+        return extract_text_from_pdf_bytes(file_bytes)
+    elif uploaded_file.type in [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword"
+    ]:
+        return extract_text_from_docx_bytes(file_bytes)
+    elif uploaded_file.type == "text/plain":
+        return file_bytes.decode("utf-8", errors="ignore")
+    return ""
+
+def extract_text_from_file_path(file_path):
+    """Extract text from a local file path (for mentor docs in Excel)."""
+    if not file_path or not isinstance(file_path, str) or file_path.strip() == "":
+        return ""
+    file_path = file_path.strip()
+    try:
+        if file_path.lower().endswith(".pdf"):
+            with open(file_path, "rb") as f:
+                return extract_text_from_pdf_bytes(f.read())
+        elif file_path.lower().endswith(".docx"):
+            with open(file_path, "rb") as f:
+                return extract_text_from_docx_bytes(f.read())
+        elif file_path.lower().endswith(".txt"):
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+    except Exception as e:
+        return f"[File read error: {e}]"
+    return ""
+
 # ------------------ LOAD DATA ------------------
 @st.cache_data
 def load_data():
     df = pd.read_excel("mentors.xlsx", engine="openpyxl")
 
-    df["Expertise"] = df["Expertise"].fillna("").astype(str)
-    df["Secondary Expertise"] = df["Secondary Expertise"].fillna("").astype(str)
-    df["Industry"] = df["Industry"].fillna("").astype(str)
-    df["Secondary Industry"] = df["Secondary Industry"].fillna("").astype(str)
-    df["Description"] = df["Description"].fillna("").astype(str)
-    df["Expertise Tags"] = df["Expertise Tags"].fillna("").astype(str)
-    df["Industry Tags"] = df["Industry Tags"].fillna("").astype(str)
+    for col in ["Expertise", "Secondary Expertise", "Industry", "Secondary Industry",
+                "Description", "Expertise Tags", "Industry Tags"]:
+        df[col] = df[col].fillna("").astype(str)
 
+    # Optional columns for doc path and LinkedIn
+    if "Document Path" not in df.columns:
+        df["Document Path"] = ""
+    if "LinkedIn" not in df.columns:
+        df["LinkedIn"] = ""
+
+    df["Document Path"] = df["Document Path"].fillna("").astype(str)
+    df["LinkedIn"] = df["LinkedIn"].fillna("").astype(str)
+
+    # Extract mentor document text
+    df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
+
+    # Build combined text for semantic search
     df["combined"] = (
         "Expertise: " + df["Expertise"] + ". " +
         "Secondary Expertise: " + df["Secondary Expertise"] + ". " +
         "Industry: " + df["Industry"] + ". " +
         "Secondary Industry: " + df["Secondary Industry"] + ". " +
         "Description: " + df["Description"] + ". " +
-        "Tags: " + df["Expertise Tags"] + " " + df["Industry Tags"]
+        "Tags: " + df["Expertise Tags"] + " " + df["Industry Tags"] + ". " +
+        "Document: " + df["Doc Text"].str[:1000]  # cap to avoid token overload
     )
     return df
 
@@ -83,6 +163,15 @@ def get_vectors(texts):
 
 vectors = get_vectors(df["combined"])
 
+# ------------------ EXTRACT USER UPLOAD TEXT ------------------
+user_doc_text = ""
+if user_uploaded_file:
+    user_doc_text = extract_text_from_uploaded_file(user_uploaded_file)
+    if user_doc_text:
+        st.sidebar.success("✅ Document parsed successfully!")
+    else:
+        st.sidebar.warning("⚠️ Could not extract text from the file.")
+
 # ------------------ CHAT HISTORY ------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -101,8 +190,13 @@ if user_input:
     with st.chat_message("user"):
         st.write(user_input)
 
+    # -------- ENRICH QUERY WITH USER DOC --------
+    enriched_query = user_input
+    if user_doc_text:
+        enriched_query = f"{user_input}\n\nAdditional context from uploaded document:\n{user_doc_text[:1500]}"
+
     # -------- SEMANTIC SEARCH --------
-    query_vec = model.encode([user_input])
+    query_vec = model.encode([enriched_query])
     similarity = cosine_similarity(query_vec, vectors)
     df["score"] = similarity[0]
 
@@ -121,22 +215,30 @@ Name: {row['Name']}
 Expertise: {row['Expertise']}
 Industry: {row['Industry']}
 Description: {row['Description']}
+Document Summary: {row['Doc Text'][:500] if row['Doc Text'] else 'Not available'}
+"""
+
+    user_context_section = ""
+    if user_doc_text:
+        user_context_section = f"""
+The user also uploaded a document with the following content (use this to better understand their needs):
+{user_doc_text[:1500]}
 """
 
     prompt = f"""
 User is looking for a mentor: "{user_input}"
-
+{user_context_section}
 Here are some mentors:
-
 {mentor_info}
 
 Task:
 1. Recommend top 3 mentors
-2. Explain WHY each is suitable
-3. Keep response simple and structured
+2. Explain WHY each is suitable based on the user's query and uploaded document (if any)
+3. Highlight relevant skills, experience, and background from their profiles
+4. Keep response simple and structured
 """
 
-    # -------- AI CALL (conditional on selected model) --------
+    # -------- AI CALL --------
     try:
         st.markdown(f"### 🤖 AI Recommendation — {ai_model}")
 
@@ -183,7 +285,9 @@ Task:
         return "Not Available"
 
     if "LinkedIn Profile" in display_df.columns:
-        display_df["LinkedIn Profile"] = display_df["LinkedIn Profile"].fillna("").astype(str).apply(make_clickable)
+        display_df["LinkedIn Profile"] = (
+            display_df["LinkedIn Profile"].fillna("").astype(str).apply(make_clickable)
+        )
 
     columns_to_show = ["Name", "Expertise", "Industry", "Short Description", "LinkedIn Profile", "Match Score"]
     display_df = display_df[[col for col in columns_to_show if col in display_df.columns]]
@@ -196,10 +300,15 @@ Task:
     for idx, row in results.iterrows():
         with st.expander(f"{row['Name']} ({row['Expertise']})"):
             st.write(f"**Industry:** {row['Industry']}")
+
             if row["Description"]:
                 st.write(row["Description"])
             else:
                 st.warning("Description not available")
+
+            if row.get("Doc Text", ""):
+                with st.expander("📄 Extracted from Mentor Document"):
+                    st.write(row["Doc Text"][:1000] + ("..." if len(row["Doc Text"]) > 1000 else ""))
+
             if pd.notna(row.get("LinkedIn", "")) and row.get("LinkedIn", "") != "":
                 st.markdown(f"[🔗 View LinkedIn Profile]({row['LinkedIn']})")
-                
