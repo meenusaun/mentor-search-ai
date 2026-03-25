@@ -3,14 +3,14 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
-
-# ------------------ OPENAI ------------------
+import anthropic
 import os
-from openai import OpenAI
 
+# ------------------ CLIENTS ------------------
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+openai_client = OpenAI()
+anthropic_client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
-client = OpenAI()
 # ------------------ PAGE CONFIG ------------------
 st.set_page_config(
     page_title="Resources Network - Look for Mentor",
@@ -30,6 +30,19 @@ with col2:
         "<h2 style='text-align: center;'>🌐 Resources Network - Look for Mentor</h2>",
         unsafe_allow_html=True
     )
+
+# ------------------ AI MODEL SELECTOR (Sidebar) ------------------
+st.sidebar.title("⚙️ Settings")
+ai_model = st.sidebar.radio(
+    "Choose AI Model for Recommendations:",
+    options=["GPT-4o Mini (OpenAI)", "Claude (Anthropic)"],
+    index=0
+)
+st.sidebar.markdown("---")
+if ai_model == "GPT-4o Mini (OpenAI)":
+    st.sidebar.info("Using **OpenAI GPT-4o Mini** for recommendations.")
+else:
+    st.sidebar.info("Using **Anthropic Claude** for recommendations.")
 
 # ------------------ LOAD DATA ------------------
 @st.cache_data
@@ -52,7 +65,6 @@ def load_data():
         "Description: " + df["Description"] + ". " +
         "Tags: " + df["Expertise Tags"] + " " + df["Industry Tags"]
     )
-
     return df
 
 df = load_data()
@@ -60,7 +72,7 @@ df = load_data()
 # ------------------ LOAD MODEL ------------------
 @st.cache_resource
 def load_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')  # upgraded
+    return SentenceTransformer('all-MiniLM-L6-v2')
 
 model = load_model()
 
@@ -85,27 +97,24 @@ user_input = st.chat_input("Ask me to find a mentor...")
 # ------------------ PROCESS INPUT ------------------
 if user_input:
 
-    # Show user message
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.write(user_input)
 
-    # -------- RESULT LOGIC --------
+    # -------- SEMANTIC SEARCH --------
     query_vec = model.encode([user_input])
     similarity = cosine_similarity(query_vec, vectors)
     df["score"] = similarity[0]
 
     filtered_df = df[df["score"] > 0.4]
-
     if filtered_df.empty:
         st.warning("No strong matches found. Showing closest results.")
         results = df.sort_values(by="score", ascending=False).head(5)
     else:
         results = filtered_df.sort_values(by="score", ascending=False).head(5)
 
-    # -------- AI RECOMMENDATION (CHATGPT) --------
+    # -------- BUILD PROMPT --------
     mentor_info = ""
-
     for _, row in results.iterrows():
         mentor_info += f"""
 Name: {row['Name']}
@@ -127,15 +136,24 @@ Task:
 3. Keep response simple and structured
 """
 
+    # -------- AI CALL (conditional on selected model) --------
     try:
-        response_ai = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
+        st.markdown(f"### 🤖 AI Recommendation — {ai_model}")
 
-        ai_output = response_ai.choices[0].message.content
+        if ai_model == "GPT-4o Mini (OpenAI)":
+            response_ai = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            ai_output = response_ai.choices[0].message.content
 
-        st.markdown("### 🤖 AI Recommendation")
+        else:  # Claude (Anthropic)
+            response_ai = anthropic_client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            ai_output = response_ai.content[0].text
 
         with st.chat_message("assistant"):
             st.write(ai_output)
@@ -143,18 +161,13 @@ Task:
         st.session_state.messages.append({"role": "assistant", "content": ai_output})
 
     except Exception as e:
-        st.error(f"OpenAI Error: {e}")
+        st.error(f"AI Error: {e}")
 
     # ------------------ TABLE DISPLAY ------------------
     st.subheader("Top Matches")
 
     display_df = results.copy()
-
-    display_df.rename(columns={
-        "score": "Match Score",
-        "LinkedIn": "LinkedIn Profile"
-    }, inplace=True)
-
+    display_df.rename(columns={"score": "Match Score", "LinkedIn": "LinkedIn Profile"}, inplace=True)
     display_df["Match Score"] = display_df["Match Score"].round(2)
 
     def shorten_text(text, length=100):
@@ -175,23 +188,18 @@ Task:
     columns_to_show = ["Name", "Expertise", "Industry", "Short Description", "LinkedIn Profile", "Match Score"]
     display_df = display_df[[col for col in columns_to_show if col in display_df.columns]]
 
-    st.write(
-        display_df.to_html(escape=False, index=False),
-        unsafe_allow_html=True
-    )
+    st.write(display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
     # ------------------ VIEW DETAILS ------------------
     st.subheader("View Mentor Details")
 
     for idx, row in results.iterrows():
-
         with st.expander(f"{row['Name']} ({row['Expertise']})"):
             st.write(f"**Industry:** {row['Industry']}")
-
             if row["Description"]:
                 st.write(row["Description"])
             else:
                 st.warning("Description not available")
-
             if pd.notna(row.get("LinkedIn", "")) and row.get("LinkedIn", "") != "":
                 st.markdown(f"[🔗 View LinkedIn Profile]({row['LinkedIn']})")
+                
