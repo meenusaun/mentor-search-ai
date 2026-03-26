@@ -243,7 +243,9 @@ The founder also uploaded a business document with the following content:
 
     # -------- BUILD MAIN PROMPT --------
     prompt = f"""
-User is looking for a mentor based on this business brief and problem statement:
+You are helping an Indian founder find the right mentor.
+
+Founder's business brief and problem statement:
 "{user_input}"
 
 {founder_context_section}
@@ -259,6 +261,10 @@ Task:
    - Mention their Current Designation and Current Organization explicitly
    - Mention their Qualification and how it adds value
    - Which specific past experience or skill makes them relevant to the founder's problem
+   - Whether the mentor has direct hands-on experience in the area the founder needs help with.
+     Hands-on means they have personally done it — not just advised, consulted or taught it.
+     Examples: personally managed exports, built a sales team from scratch,
+     raised funding themselves, ran a manufacturing unit, dealt with DGFT or customs, etc.
 4. Keep response simple, structured and founder-friendly
 5. Return your answer strictly as a JSON array with exactly 5 objects in this format:
 
@@ -269,7 +275,9 @@ Task:
     "Relevant Experience": "specific experience or skill relevant to the problem",
     "Current Designation": "their current designation",
     "Current Organization": "their current organization",
-    "Qualification": "their qualification"
+    "Qualification": "their qualification",
+    "Hands On Experience": "Yes / No / Partial",
+    "Hands On Details": "1-2 lines describing exactly what they have personally done that is directly relevant. If No, mention what is missing."
   }}
 ]
 
@@ -299,16 +307,26 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
         try:
             ai_recommendations = json.loads(cleaned)
         except json.JSONDecodeError:
-            match = re.search(r'\[.*\]', cleaned, re.DOTALL)
-            ai_recommendations = json.loads(match.group()) if match else []
+            match_json = re.search(r'\[.*\]', cleaned, re.DOTALL)
+            ai_recommendations = json.loads(match_json.group()) if match_json else []
 
         # -------- SHOW AI RECOMMENDATION CARDS --------
         if ai_recommendations:
             for i, mentor in enumerate(ai_recommendations):
+
+                # Hands-on badge for expander title
+                hands_on = mentor.get("Hands On Experience", "").strip()
+                if hands_on == "Yes":
+                    badge = "🟢 Hands-On"
+                elif hands_on == "Partial":
+                    badge = "🟡 Partial"
+                else:
+                    badge = "🔴 No Direct Experience"
+
                 with st.expander(
                     f"#{i+1} — {mentor.get('Name', 'N/A')} | "
                     f"{mentor.get('Current Designation', '')} at "
-                    f"{mentor.get('Current Organization', '')}",
+                    f"{mentor.get('Current Organization', '')} | {badge}",
                     expanded=(i == 0)
                 ):
                     col1, col2 = st.columns(2)
@@ -321,16 +339,28 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
                             f"{mentor.get('Current Designation', '')} — "
                             f"{mentor.get('Current Organization', '')}"
                         )
+
                     st.markdown("**✅ Why Suitable**")
                     st.write(mentor.get("Match Reason", ""))
+
                     st.markdown("**💼 Relevant Experience**")
                     st.write(mentor.get("Relevant Experience", ""))
+
+                    # Hands-on section with color coding
+                    st.markdown("**🛠️ Hands-On Experience in Founder's Area**")
+                    if hands_on == "Yes":
+                        st.success(f"✅ Yes — {mentor.get('Hands On Details', '')}")
+                    elif hands_on == "Partial":
+                        st.warning(f"⚠️ Partial — {mentor.get('Hands On Details', '')}")
+                    else:
+                        st.error(f"❌ No Direct Experience — {mentor.get('Hands On Details', '')}")
 
                     matched_row = df[df["Name"] == mentor.get("Name")]
                     if not matched_row.empty:
                         linkedin = matched_row.iloc[0].get("LinkedIn", "")
                         if pd.notna(linkedin) and str(linkedin).strip() != "":
                             st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
+
         else:
             st.warning("Could not parse AI recommendations. Showing raw response.")
             with st.chat_message("assistant"):
@@ -344,6 +374,7 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
         if ai_recommendations:
             ai_df = pd.DataFrame(ai_recommendations)
 
+            # Merge LinkedIn from original df
             linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
             ai_df["LinkedIn Profile"] = ai_df["Name"].map(linkedin_map).fillna("")
 
@@ -354,20 +385,36 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
 
             ai_df["LinkedIn Profile"] = ai_df["LinkedIn Profile"].apply(make_clickable)
 
+            # Match Score from embedding model
             score_map = df.set_index("Name")["score"].to_dict()
             ai_df["Match Score"] = ai_df["Name"].map(score_map).fillna(0).round(2)
 
+            # Short description from original df
             desc_map = df.set_index("Name")["Description"].to_dict()
             ai_df["Short Description"] = ai_df["Name"].map(desc_map).apply(
                 lambda x: (x[:100] + "...") if isinstance(x, str) and len(x) > 100 else x
             )
 
+            # Industry from original df
             industry_map = df.set_index("Name")["Industry"].to_dict()
             ai_df["Industry"] = ai_df["Name"].map(industry_map).fillna("")
 
+            # Color code Hands On Experience in table
+            def color_hands_on(val):
+                if val == "Yes":
+                    return "🟢 Yes"
+                elif val == "Partial":
+                    return "🟡 Partial"
+                else:
+                    return "🔴 No"
+
+            if "Hands On Experience" in ai_df.columns:
+                ai_df["Hands On Experience"] = ai_df["Hands On Experience"].apply(color_hands_on)
+
             columns_to_show = [
                 "Name", "Qualification", "Current Designation", "Current Organization",
-                "Industry", "Short Description", "LinkedIn Profile", "Match Score"
+                "Industry", "Hands On Experience", "Short Description",
+                "LinkedIn Profile", "Match Score"
             ]
             ai_df = ai_df[[col for col in columns_to_show if col in ai_df.columns]]
             st.write(ai_df.to_html(escape=False, index=False), unsafe_allow_html=True)
@@ -386,7 +433,7 @@ A founder is looking for a mentor with this requirement:
 The AI has already recommended these top 5 mentors:
 {json.dumps(ai_recommendations, indent=2)}
 
-Now evaluate this uploaded mentor profile against the founder's requirement 
+Now evaluate this uploaded mentor profile against the founder's requirement
 and compare it with the top 5 AI recommended mentors:
 
 Uploaded Mentor Profile:
@@ -396,6 +443,8 @@ Return strictly as a JSON object in this format:
 {{
   "Uploaded Mentor Name": "name if found in profile, else 'Uploaded Mentor'",
   "Match Score": "score out of 10",
+  "Hands On Experience": "Yes / No / Partial",
+  "Hands On Details": "1-2 lines on what they have personally done relevant to founder's problem",
   "Match Summary": "2-3 lines on how well this mentor matches the founder's requirement",
   "Key Strengths": "top 3 strengths relevant to the founder's problem",
   "Gaps": "any gaps compared to what the founder needs",
@@ -424,13 +473,13 @@ Return only the JSON object. No extra text.
                 try:
                     score_result = json.loads(score_cleaned)
                 except json.JSONDecodeError:
-                    match = re.search(r'\{.*\}', score_cleaned, re.DOTALL)
-                    score_result = json.loads(match.group()) if match else {}
+                    match_score = re.search(r'\{.*\}', score_cleaned, re.DOTALL)
+                    score_result = json.loads(match_score.group()) if match_score else {}
 
                 if score_result:
-                    # Score card display
                     score_val = score_result.get("Match Score", "N/A")
                     mentor_name = score_result.get("Uploaded Mentor Name", "Uploaded Mentor")
+                    hands_on_val = score_result.get("Hands On Experience", "").strip()
 
                     st.markdown(f"#### 👤 {mentor_name}")
 
@@ -438,11 +487,16 @@ Return only the JSON object. No extra text.
                     with col1:
                         st.metric("🎯 Match Score", f"{score_val} / 10")
                     with col2:
+                        st.markdown("**🛠️ Hands-On Experience**")
+                        if hands_on_val == "Yes":
+                            st.success(f"🟢 Yes — {score_result.get('Hands On Details', '')}")
+                        elif hands_on_val == "Partial":
+                            st.warning(f"🟡 Partial — {score_result.get('Hands On Details', '')}")
+                        else:
+                            st.error(f"🔴 No — {score_result.get('Hands On Details', '')}")
+                    with col3:
                         st.markdown("**📊 Rank vs AI Top 5**")
                         st.write(score_result.get("Rank vs Top 5", "N/A"))
-                    with col3:
-                        st.markdown("**📝 Summary**")
-                        st.write(score_result.get("Match Summary", "N/A"))
 
                     st.markdown("---")
                     col4, col5 = st.columns(2)
@@ -452,6 +506,10 @@ Return only the JSON object. No extra text.
                     with col5:
                         st.markdown("**⚠️ Gaps**")
                         st.write(score_result.get("Gaps", "N/A"))
+
+                    st.markdown("**📝 Match Summary**")
+                    st.write(score_result.get("Match Summary", "N/A"))
+
                 else:
                     st.warning("Could not parse mentor profile score.")
                     st.write(score_raw)
