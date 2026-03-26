@@ -46,12 +46,26 @@ if ai_model == "GPT-4o Mini (OpenAI)":
 else:
     st.sidebar.info("Using **Anthropic Claude** for recommendations.")
 
+# ------------------ FILE UPLOADER 1: FOUNDER DOC ------------------
 st.sidebar.markdown("---")
-st.sidebar.subheader("📄 Upload Your Profile (Optional)")
-user_uploaded_file = st.sidebar.file_uploader(
-    "Upload your resume or requirements doc",
+st.sidebar.subheader("📋 Upload Business Document")
+st.sidebar.caption("Upload your pitch deck, business plan, or any document describing your business and problem.")
+founder_uploaded_file = st.sidebar.file_uploader(
+    "Pitch Deck / Business Document",
     type=["pdf", "docx", "txt"],
-    help="Upload a PDF, Word doc, or text file to help find better mentor matches."
+    key="founder_doc",
+    help="This helps the AI better understand your business context and find relevant mentors."
+)
+
+# ------------------ FILE UPLOADER 2: MENTOR PROFILE ------------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("👤 Check a Mentor's Profile")
+st.sidebar.caption("Upload a mentor's resume or profile to check how well they match your requirement.")
+mentor_uploaded_file = st.sidebar.file_uploader(
+    "Mentor Resume / Profile",
+    type=["pdf", "docx", "txt"],
+    key="mentor_profile",
+    help="The app will score this mentor against the AI top 5 recommendations."
 )
 
 # ------------------ DOCUMENT EXTRACTION UTILS ------------------
@@ -120,22 +134,11 @@ def load_data():
                 "Description", "Expertise Tags", "Industry Tags"]:
         df[col] = df[col].fillna("").astype(str)
 
-    if "Document Path" not in df.columns:
-        df["Document Path"] = ""
-    if "LinkedIn" not in df.columns:
-        df["LinkedIn"] = ""
-    if "Qualification" not in df.columns:
-        df["Qualification"] = ""
-    if "Current Organization" not in df.columns:
-        df["Current Organization"] = ""
-    if "Current Designation" not in df.columns:
-        df["Current Designation"] = ""
-
-    df["Document Path"] = df["Document Path"].fillna("").astype(str)
-    df["LinkedIn"] = df["LinkedIn"].fillna("").astype(str)
-    df["Qualification"] = df["Qualification"].fillna("").astype(str)
-    df["Current Organization"] = df["Current Organization"].fillna("").astype(str)
-    df["Current Designation"] = df["Current Designation"].fillna("").astype(str)
+    for col in ["Document Path", "LinkedIn", "Qualification",
+                "Current Organization", "Current Designation"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("").astype(str)
 
     df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
 
@@ -169,14 +172,22 @@ def get_vectors(texts):
 
 vectors = get_vectors(df["combined"])
 
-# ------------------ EXTRACT USER UPLOAD TEXT ------------------
-user_doc_text = ""
-if user_uploaded_file:
-    user_doc_text = extract_text_from_uploaded_file(user_uploaded_file)
-    if user_doc_text:
-        st.sidebar.success("✅ Document parsed successfully!")
+# ------------------ EXTRACT UPLOADED FILE TEXTS ------------------
+founder_doc_text = ""
+if founder_uploaded_file:
+    founder_doc_text = extract_text_from_uploaded_file(founder_uploaded_file)
+    if founder_doc_text:
+        st.sidebar.success("✅ Business document parsed successfully!")
     else:
-        st.sidebar.warning("⚠️ Could not extract text from the file.")
+        st.sidebar.warning("⚠️ Could not extract text from business document.")
+
+mentor_profile_text = ""
+if mentor_uploaded_file:
+    mentor_profile_text = extract_text_from_uploaded_file(mentor_uploaded_file)
+    if mentor_profile_text:
+        st.sidebar.success("✅ Mentor profile parsed successfully!")
+    else:
+        st.sidebar.warning("⚠️ Could not extract text from mentor profile.")
 
 # ------------------ CHAT HISTORY ------------------
 if "messages" not in st.session_state:
@@ -196,17 +207,15 @@ if user_input:
     with st.chat_message("user"):
         st.write(user_input)
 
-    # -------- ENRICH QUERY WITH USER DOC --------
+    # -------- ENRICH QUERY WITH FOUNDER DOC --------
     enriched_query = user_input
-    if user_doc_text:
-        enriched_query = f"{user_input}\n\nAdditional context from uploaded document:\n{user_doc_text[:1500]}"
+    if founder_doc_text:
+        enriched_query = f"{user_input}\n\nAdditional context from business document:\n{founder_doc_text[:1500]}"
 
-    # -------- SEMANTIC SEARCH (to get candidate pool) --------
+    # -------- SEMANTIC SEARCH --------
     query_vec = model.encode([enriched_query])
     similarity = cosine_similarity(query_vec, vectors)
     df["score"] = similarity[0]
-
-    # Get top 10 candidates from embedding model to pass to AI
     candidates = df.sort_values(by="score", ascending=False).head(10)
 
     # -------- BUILD MENTOR INFO FOR PROMPT --------
@@ -225,19 +234,19 @@ Document Summary: {row['Doc Text'][:500] if row['Doc Text'] else 'Not available'
 ---
 """
 
-    user_context_section = ""
-    if user_doc_text:
-        user_context_section = f"""
-The user also uploaded a document with the following content:
-{user_doc_text[:1500]}
+    founder_context_section = ""
+    if founder_doc_text:
+        founder_context_section = f"""
+The founder also uploaded a business document with the following content:
+{founder_doc_text[:1500]}
 """
 
-    # -------- BUILD PROMPT --------
+    # -------- BUILD MAIN PROMPT --------
     prompt = f"""
 User is looking for a mentor based on this business brief and problem statement:
 "{user_input}"
 
-{user_context_section}
+{founder_context_section}
 
 Here are mentor profiles to evaluate:
 {mentor_info}
@@ -277,8 +286,7 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
                 messages=[{"role": "user", "content": prompt}]
             )
             ai_raw = response_ai.choices[0].message.content
-
-        else:  # Claude (Anthropic)
+        else:
             response_ai = anthropic_client.messages.create(
                 model="claude-sonnet-4-5",
                 max_tokens=2048,
@@ -286,17 +294,13 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
             )
             ai_raw = response_ai.content[0].text
 
-        # -------- PARSE JSON FROM AI RESPONSE --------
+        # -------- PARSE JSON --------
         cleaned = re.sub(r"```json|```", "", ai_raw).strip()
-
         try:
             ai_recommendations = json.loads(cleaned)
         except json.JSONDecodeError:
             match = re.search(r'\[.*\]', cleaned, re.DOTALL)
-            if match:
-                ai_recommendations = json.loads(match.group())
-            else:
-                ai_recommendations = []
+            ai_recommendations = json.loads(match.group()) if match else []
 
         # -------- SHOW AI RECOMMENDATION CARDS --------
         if ai_recommendations:
@@ -322,7 +326,6 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
                     st.markdown("**💼 Relevant Experience**")
                     st.write(mentor.get("Relevant Experience", ""))
 
-                    # Match LinkedIn from original df
                     matched_row = df[df["Name"] == mentor.get("Name")]
                     if not matched_row.empty:
                         linkedin = matched_row.iloc[0].get("LinkedIn", "")
@@ -341,7 +344,6 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
         if ai_recommendations:
             ai_df = pd.DataFrame(ai_recommendations)
 
-            # Merge LinkedIn from original df
             linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
             ai_df["LinkedIn Profile"] = ai_df["Name"].map(linkedin_map).fillna("")
 
@@ -352,17 +354,14 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
 
             ai_df["LinkedIn Profile"] = ai_df["LinkedIn Profile"].apply(make_clickable)
 
-            # Match Score from embedding model
             score_map = df.set_index("Name")["score"].to_dict()
             ai_df["Match Score"] = ai_df["Name"].map(score_map).fillna(0).round(2)
 
-            # Short description from original df
             desc_map = df.set_index("Name")["Description"].to_dict()
             ai_df["Short Description"] = ai_df["Name"].map(desc_map).apply(
                 lambda x: (x[:100] + "...") if isinstance(x, str) and len(x) > 100 else x
             )
 
-            # Industry from original df
             industry_map = df.set_index("Name")["Industry"].to_dict()
             ai_df["Industry"] = ai_df["Name"].map(industry_map).fillna("")
 
@@ -371,27 +370,97 @@ Return only the JSON array. No extra text, no markdown, no explanation outside t
                 "Industry", "Short Description", "LinkedIn Profile", "Match Score"
             ]
             ai_df = ai_df[[col for col in columns_to_show if col in ai_df.columns]]
-
             st.write(ai_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
-        else:
-            # Fallback to embedding results
-            st.warning("Showing embedding-based results as fallback.")
-            fallback_df = candidates.head(5).copy()
-            fallback_df.rename(columns={"score": "Match Score", "LinkedIn": "LinkedIn Profile"}, inplace=True)
-            fallback_df["Match Score"] = fallback_df["Match Score"].round(2)
-            fallback_df["Short Description"] = fallback_df["Description"].apply(
-                lambda x: (x[:100] + "...") if isinstance(x, str) and len(x) > 100 else x
-            )
-            fallback_df["LinkedIn Profile"] = fallback_df["LinkedIn Profile"].fillna("").astype(str).apply(
-                lambda link: f'<a href="{link}" target="_blank">View Profile</a>' if link.strip() != "" else "Not Available"
-            )
-            columns_to_show = [
-                "Name", "Qualification", "Current Designation", "Current Organization",
-                "Industry", "Short Description", "LinkedIn Profile", "Match Score"
-            ]
-            fallback_df = fallback_df[[col for col in columns_to_show if col in fallback_df.columns]]
-            st.write(fallback_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+        # -------- UPLOADED MENTOR PROFILE SCORING --------
+        if mentor_profile_text and ai_recommendations:
+            st.markdown("---")
+            st.subheader("📊 Uploaded Mentor Profile — Match Analysis")
+
+            scoring_prompt = f"""
+A founder is looking for a mentor with this requirement:
+"{user_input}"
+
+{founder_context_section}
+
+The AI has already recommended these top 5 mentors:
+{json.dumps(ai_recommendations, indent=2)}
+
+Now evaluate this uploaded mentor profile against the founder's requirement 
+and compare it with the top 5 AI recommended mentors:
+
+Uploaded Mentor Profile:
+{mentor_profile_text[:2000]}
+
+Return strictly as a JSON object in this format:
+{{
+  "Uploaded Mentor Name": "name if found in profile, else 'Uploaded Mentor'",
+  "Match Score": "score out of 10",
+  "Match Summary": "2-3 lines on how well this mentor matches the founder's requirement",
+  "Key Strengths": "top 3 strengths relevant to the founder's problem",
+  "Gaps": "any gaps compared to what the founder needs",
+  "Rank vs Top 5": "how this mentor ranks compared to AI top 5 (e.g. Better than #3 and #4, weaker than #1 and #2)"
+}}
+
+Return only the JSON object. No extra text.
+"""
+
+            try:
+                if ai_model == "GPT-4o Mini (OpenAI)":
+                    score_response = openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": scoring_prompt}]
+                    )
+                    score_raw = score_response.choices[0].message.content
+                else:
+                    score_response = anthropic_client.messages.create(
+                        model="claude-sonnet-4-5",
+                        max_tokens=1024,
+                        messages=[{"role": "user", "content": scoring_prompt}]
+                    )
+                    score_raw = score_response.content[0].text
+
+                score_cleaned = re.sub(r"```json|```", "", score_raw).strip()
+                try:
+                    score_result = json.loads(score_cleaned)
+                except json.JSONDecodeError:
+                    match = re.search(r'\{.*\}', score_cleaned, re.DOTALL)
+                    score_result = json.loads(match.group()) if match else {}
+
+                if score_result:
+                    # Score card display
+                    score_val = score_result.get("Match Score", "N/A")
+                    mentor_name = score_result.get("Uploaded Mentor Name", "Uploaded Mentor")
+
+                    st.markdown(f"#### 👤 {mentor_name}")
+
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("🎯 Match Score", f"{score_val} / 10")
+                    with col2:
+                        st.markdown("**📊 Rank vs AI Top 5**")
+                        st.write(score_result.get("Rank vs Top 5", "N/A"))
+                    with col3:
+                        st.markdown("**📝 Summary**")
+                        st.write(score_result.get("Match Summary", "N/A"))
+
+                    st.markdown("---")
+                    col4, col5 = st.columns(2)
+                    with col4:
+                        st.markdown("**✅ Key Strengths**")
+                        st.write(score_result.get("Key Strengths", "N/A"))
+                    with col5:
+                        st.markdown("**⚠️ Gaps**")
+                        st.write(score_result.get("Gaps", "N/A"))
+                else:
+                    st.warning("Could not parse mentor profile score.")
+                    st.write(score_raw)
+
+            except Exception as e:
+                st.error(f"Mentor Profile Scoring Error: {e}")
+
+        elif mentor_profile_text and not ai_recommendations:
+            st.info("💡 Mentor profile uploaded. Run a search first to get match analysis.")
 
     except Exception as e:
         st.error(f"AI Error: {e}")
