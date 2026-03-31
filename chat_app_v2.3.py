@@ -87,7 +87,7 @@ def extract_text_from_pdf_bytes(file_bytes):
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
-    except Exception as e:
+    except Exception:
         text = ""
     return text.strip()
 
@@ -97,7 +97,7 @@ def extract_text_from_docx_bytes(file_bytes):
         doc = docx.Document(BytesIO(file_bytes))
         for para in doc.paragraphs:
             text += para.text + "\n"
-    except Exception as e:
+    except Exception:
         text = ""
     return text.strip()
 
@@ -157,15 +157,13 @@ def load_data():
             df[col] = ""
         df[col] = df[col].fillna("").astype(str)
 
-    # Extract text from mentor PDFs — silently skip if not available
     df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
 
-    # PDF availability flag
     df["PDF Available"] = df["Doc Text"].apply(
         lambda x: "✅ Yes" if x and len(x) > 50 else "❌ No"
     )
 
-    # ✅ FIXED — Only include Doc Text in combined if it actually has content
+    # Only include Doc Text in combined if it has real content
     def build_combined(row):
         parts = [
             f"Expertise: {row['Expertise']}",
@@ -293,7 +291,6 @@ def display_mentor_card(mentor, index, df):
 
         st.markdown("---")
 
-        # ---- PROFILE INFO ----
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**🎓 Qualification**")
@@ -319,7 +316,6 @@ def display_mentor_card(mentor, index, df):
         else:
             st.error(f"❌ No Direct Experience — {mentor.get('Hands On Details', '')}")
 
-        # PDF + LinkedIn
         matched_row = df[df["Name"] == mentor.get("Name")]
         if not matched_row.empty:
             pdf_status = matched_row.iloc[0].get("PDF Available", "❌ No")
@@ -328,7 +324,7 @@ def display_mentor_card(mentor, index, df):
             if pd.notna(linkedin) and str(linkedin).strip() != "":
                 st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
 
-# ------------------ DISPLAY FULL RESULTS ------------------
+# ------------------ DISPLAY FULL RESULTS — NO TABLES ------------------
 def display_mentor_results(ai_recommendations, df):
     if not ai_recommendations:
         return
