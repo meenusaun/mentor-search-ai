@@ -204,10 +204,10 @@ model = load_model()
 
 # ------------------ CREATE VECTORS ------------------
 @st.cache_data
-def get_vectors(_model, texts):
-    return _model.encode(texts)
+def get_vectors(texts):
+    return model.encode(texts)
 
-vectors = get_vectors(model, df["combined"].tolist())
+vectors = get_vectors(df["combined"].tolist())
 
 # ------------------ EXTRACT UPLOADED FILE TEXTS ------------------
 founder_doc_text = ""
