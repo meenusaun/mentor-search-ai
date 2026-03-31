@@ -621,3 +621,175 @@ Return only the JSON array. No extra text, no markdown outside the array.
 
                         summary = (
                             f"Found **{tier1_count} Tier 1 mentor(s)** "
+                            f"(Industry + Hands-On match) and "
+                            f"**{tier2_count} Tier 2 mentor(s)** (partial match).\n\n"
+                            f"You can ask me to **compare any two mentors**, "
+                            f"**tell me more about a specific mentor**, "
+                            f"**refine the search**, or **start a new search** anytime."
+                        )
+                        st.markdown(summary)
+                        display_mentor_results(ai_recommendations, df)
+
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "type": "recommendations",
+                            "summary": summary,
+                            "recommendations": ai_recommendations,
+                            "content": summary
+                        })
+                    else:
+                        fallback = "I could not find strong matches. Could you describe your business problem in more detail?"
+                        st.markdown(fallback)
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "type": "text",
+                            "content": fallback
+                        })
+
+                except Exception as e:
+                    st.error(f"AI Error: {e}")
+
+    # -------- UPLOADED MENTOR PROFILE SCORING --------
+    if mentor_profile_text and st.session_state.last_recommendations:
+        with st.chat_message("assistant"):
+            with st.spinner("Scoring uploaded mentor profile..."):
+
+                founder_context_section = ""
+                if founder_doc_text:
+                    founder_context_section = f"Founder uploaded a business document:\n{founder_doc_text[:1500]}"
+
+                scoring_prompt = f"""
+A founder is looking for a mentor with this requirement:
+"{st.session_state.last_query}"
+
+{founder_context_section}
+
+TIER RULES:
+- Tier 1: Mentor matches BOTH industry AND has hands-on experience in founder's problem
+- Tier 2: Mentor matches only one — either industry OR hands-on experience
+
+SCORING:
+- Industry Match: 3 points
+- Hands-On Experience: 3 points
+- Relevant Expertise: 2 points
+- Qualification + Credibility: 2 points
+
+Current AI recommended mentors for comparison:
+{json.dumps(st.session_state.last_recommendations, indent=2)}
+
+Evaluate this uploaded mentor profile:
+{mentor_profile_text[:2000]}
+
+Return strictly as a JSON object:
+{{
+  "Uploaded Mentor Name": "name if found, else 'Uploaded Mentor'",
+  "Tier": "1 or 2 based on tier rules above",
+  "Tier Reason": "one line explaining why this mentor is Tier 1 or Tier 2",
+  "Overall Score": "score out of 10 as number only",
+  "Industry Match Score": "score | one line explanation",
+  "Hands On Score": "score | one line explanation",
+  "Expertise Score": "score | one line explanation",
+  "Credibility Score": "score | one line explanation",
+  "Hands On Experience": "Yes / No / Partial",
+  "Hands On Details": "1-2 lines on what they have personally done",
+  "Match Summary": "2-3 lines — lead with industry match and hands-on experience",
+  "Key Strengths": "top 3 strengths relevant to founder's problem",
+  "Gaps": "any gaps compared to what the founder needs",
+  "Rank vs Tier 1": "how this mentor compares to Tier 1 mentors if any",
+  "Rank vs Tier 2": "how this mentor compares to Tier 2 mentors"
+}}
+
+Return only the JSON object. No extra text.
+"""
+                try:
+                    score_raw = call_ai(scoring_prompt, max_tokens=1024)
+                    score_cleaned = re.sub(r"```json|```", "", score_raw).strip()
+
+                    try:
+                        score_result = json.loads(score_cleaned)
+                    except json.JSONDecodeError:
+                        match_score = re.search(r'\{.*\}', score_cleaned, re.DOTALL)
+                        score_result = json.loads(match_score.group()) if match_score else {}
+
+                    if score_result:
+                        mentor_name = score_result.get("Uploaded Mentor Name", "Uploaded Mentor")
+                        score_val = score_result.get("Overall Score", "N/A")
+                        hands_on_val = score_result.get("Hands On Experience", "").strip()
+                        tier_val = score_result.get("Tier", "2")
+
+                        tier_color = "🏆" if tier_val == "1" else "🔍"
+                        st.markdown(
+                            f"---\n#### {tier_color} Uploaded Mentor — "
+                            f"{mentor_name} | Tier {tier_val}"
+                        )
+
+                        tier_reason = score_result.get("Tier Reason", "")
+                        if tier_val == "1":
+                            st.success(f"✅ Tier 1 — {tier_reason}")
+                        else:
+                            st.warning(f"⚠️ Tier 2 — {tier_reason}")
+
+                        st.markdown("### 📊 Match Scorecard")
+                        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+
+                        with sc1:
+                            st.metric("⭐ Overall", f"{score_val} / 10")
+
+                        for col, key, label, max_val in [
+                            (sc2, "Industry Match Score", "🏭 Industry", "3"),
+                            (sc3, "Hands On Score", "🛠️ Hands-On", "3"),
+                            (sc4, "Expertise Score", "💼 Expertise", "2"),
+                            (sc5, "Credibility Score", "🎓 Credibility", "2"),
+                        ]:
+                            with col:
+                                raw = score_result.get(key, "N/A")
+                                parts = raw.split("|") if isinstance(raw, str) and "|" in raw else [raw, ""]
+                                st.metric(label, f"{parts[0].strip()} / {max_val}")
+                                if len(parts) > 1:
+                                    st.caption(parts[1].strip())
+
+                        st.markdown("---")
+
+                        st.markdown("**🛠️ Hands-On Experience**")
+                        if hands_on_val == "Yes":
+                            st.success(f"🟢 Yes — {score_result.get('Hands On Details', '')}")
+                        elif hands_on_val == "Partial":
+                            st.warning(f"🟡 Partial — {score_result.get('Hands On Details', '')}")
+                        else:
+                            st.error(f"🔴 No — {score_result.get('Hands On Details', '')}")
+
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("**📊 Rank vs Tier 1**")
+                            st.write(score_result.get("Rank vs Tier 1", "N/A"))
+                        with col2:
+                            st.markdown("**📊 Rank vs Tier 2**")
+                            st.write(score_result.get("Rank vs Tier 2", "N/A"))
+
+                        col3, col4 = st.columns(2)
+                        with col3:
+                            st.markdown("**✅ Key Strengths**")
+                            st.write(score_result.get("Key Strengths", "N/A"))
+                        with col4:
+                            st.markdown("**⚠️ Gaps**")
+                            st.write(score_result.get("Gaps", "N/A"))
+
+                        st.markdown("**📝 Match Summary**")
+                        st.write(score_result.get("Match Summary", "N/A"))
+
+                        score_content = (
+                            f"Uploaded mentor **{mentor_name}** is **Tier {tier_val}** "
+                            f"with score **{score_val}/10**. {tier_reason}"
+                        )
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "type": "mentor_score",
+                            "content": score_content
+                        })
+
+                except Exception as e:
+                    st.error(f"Mentor Scoring Error: {e}")
+
+    elif mentor_profile_text and not st.session_state.last_recommendations:
+        with st.chat_message("assistant"):
+            st.info("💡 Mentor profile uploaded. Run a search first to get match analysis.")
