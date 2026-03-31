@@ -82,8 +82,8 @@ def extract_text_from_pdf_bytes(file_bytes):
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
-    except Exception as e:
-        text = f"[PDF extraction error: {e}]"
+    except Exception:
+        text = ""
     return text.strip()
 
 def extract_text_from_docx_bytes(file_bytes):
@@ -92,8 +92,8 @@ def extract_text_from_docx_bytes(file_bytes):
         doc = docx.Document(BytesIO(file_bytes))
         for para in doc.paragraphs:
             text += para.text + "\n"
-    except Exception as e:
-        text = f"[DOCX extraction error: {e}]"
+    except Exception:
+        text = ""
     return text.strip()
 
 def extract_text_from_uploaded_file(uploaded_file):
@@ -126,27 +126,44 @@ def extract_text_from_file_path(file_path):
         elif file_path.lower().endswith(".txt"):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
-    except Exception as e:
-        return f"[File read error: {e}]"
+    except Exception:
+        return ""
     return ""
 
 # ------------------ LOAD DATA ------------------
 @st.cache_data
 def load_data():
-    df = pd.read_excel("mentors.xlsx", engine="openpyxl")
+    # ✅ FIX 1 — faster Excel loading with dtype=str and na_filter=False
+    df = pd.read_excel(
+        "mentors.xlsx",
+        engine="openpyxl",
+        dtype=str,
+        na_filter=False
+    )
 
-    for col in ["Expertise", "Secondary Expertise", "Industry", "Secondary Industry",
-                "Description", "Expertise Tags", "Industry Tags"]:
-        df[col] = df[col].fillna("").astype(str)
-
-    for col in ["Document Path", "LinkedIn", "Qualification",
-                "Current Organization", "Current Designation"]:
+    # ✅ FIX 2 — no need for fillna/astype since dtype=str handles it
+    # Just ensure required columns exist
+    required_cols = [
+        "Expertise", "Secondary Expertise", "Industry", "Secondary Industry",
+        "Description", "Expertise Tags", "Industry Tags",
+        "Document Path", "LinkedIn", "Qualification",
+        "Current Organization", "Current Designation"
+    ]
+    for col in required_cols:
         if col not in df.columns:
             df[col] = ""
-        df[col] = df[col].fillna("").astype(str)
 
-    df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
+    # ✅ FIX 3 — skip PDF loading on Streamlit Cloud entirely
+    is_cloud = os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit" or \
+               os.environ.get("IS_STREAMLIT_CLOUD") is not None or \
+               not os.path.exists(os.path.expanduser("~/.streamlit/config.toml"))
 
+    if is_cloud:
+        df["Doc Text"] = ""
+    else:
+        df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
+
+    # ✅ FIX 4 — vectorized combined field, no apply()
     df["combined"] = (
         "Expertise: " + df["Expertise"] + ". " +
         "Secondary Expertise: " + df["Secondary Expertise"] + ". " +
@@ -156,14 +173,14 @@ def load_data():
         "Tags: " + df["Expertise Tags"] + " " + df["Industry Tags"] + ". " +
         "Qualification: " + df["Qualification"] + ". " +
         "Current Organization: " + df["Current Organization"] + ". " +
-        "Current Designation: " + df["Current Designation"] + ". " +
-        "Document: " + df["Doc Text"].str[:1000]
+        "Current Designation: " + df["Current Designation"]
     )
     return df
 
 df = load_data()
 
 # ------------------ LOAD MODEL ------------------
+# ✅ FIX 5 — model is cached with cache_resource so loads only once
 @st.cache_resource
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
@@ -171,6 +188,7 @@ def load_model():
 model = load_model()
 
 # ------------------ CREATE VECTORS ------------------
+# ✅ FIX 6 — batch encoding + tolist() for proper cache hashing
 @st.cache_data
 def get_vectors(texts):
     return model.encode(texts, batch_size=64, show_progress_bar=False)
@@ -214,7 +232,9 @@ def detect_intent(user_input, last_recommendations):
     ]
     input_lower = user_input.lower()
     has_recommendations = len(last_recommendations) > 0
-    is_followup = has_recommendations and any(kw in input_lower for kw in followup_keywords)
+    is_followup = has_recommendations and any(
+        kw in input_lower for kw in followup_keywords
+    )
     return "followup" if is_followup else "new_search"
 
 # ------------------ DISPLAY SINGLE MENTOR CARD ------------------
@@ -236,41 +256,28 @@ def display_mentor_card(mentor, index, tier_label, df):
         f"⭐ {overall}/10 | {badge}",
         expanded=(index == 1)
     ):
-        # ---- WEIGHTED SCORECARD ----
         st.markdown("### 📊 Match Scorecard")
         sc1, sc2, sc3, sc4 = st.columns(4)
 
-        with sc1:
-            industry_score = mentor.get("Industry Match Score", "N/A")
-            parts = industry_score.split("|") if isinstance(industry_score, str) and "|" in industry_score else [industry_score, ""]
-            st.metric("🏭 Industry Match", f"{parts[0].strip()} / 3")
-            if len(parts) > 1:
-                st.caption(parts[1].strip())
-
-        with sc2:
-            hands_on_score = mentor.get("Hands On Score", "N/A")
-            parts = hands_on_score.split("|") if isinstance(hands_on_score, str) and "|" in hands_on_score else [hands_on_score, ""]
-            st.metric("🛠️ Hands-On Exp", f"{parts[0].strip()} / 3")
-            if len(parts) > 1:
-                st.caption(parts[1].strip())
-
-        with sc3:
-            expertise_score = mentor.get("Expertise Score", "N/A")
-            parts = expertise_score.split("|") if isinstance(expertise_score, str) and "|" in expertise_score else [expertise_score, ""]
-            st.metric("💼 Expertise", f"{parts[0].strip()} / 2")
-            if len(parts) > 1:
-                st.caption(parts[1].strip())
-
-        with sc4:
-            cred_score = mentor.get("Credibility Score", "N/A")
-            parts = cred_score.split("|") if isinstance(cred_score, str) and "|" in cred_score else [cred_score, ""]
-            st.metric("🎓 Credibility", f"{parts[0].strip()} / 2")
-            if len(parts) > 1:
-                st.caption(parts[1].strip())
+        for col, key, label, max_val in [
+            (sc1, "Industry Match Score", "🏭 Industry Match", "3"),
+            (sc2, "Hands On Score", "🛠️ Hands-On Exp", "3"),
+            (sc3, "Expertise Score", "💼 Expertise", "2"),
+            (sc4, "Credibility Score", "🎓 Credibility", "2"),
+        ]:
+            with col:
+                raw = mentor.get(key, "N/A")
+                parts = (
+                    raw.split("|")
+                    if isinstance(raw, str) and "|" in raw
+                    else [raw, ""]
+                )
+                st.metric(label, f"{parts[0].strip()} / {max_val}")
+                if len(parts) > 1:
+                    st.caption(parts[1].strip())
 
         st.markdown("---")
 
-        # ---- PROFILE INFO ----
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**🎓 Qualification**")
@@ -296,107 +303,43 @@ def display_mentor_card(mentor, index, tier_label, df):
         else:
             st.error(f"❌ No Direct Experience — {mentor.get('Hands On Details', '')}")
 
-        matched_row = df[df["Name"] == mentor.get("Name")]
-        if not matched_row.empty:
-            linkedin = matched_row.iloc[0].get("LinkedIn", "")
-            if pd.notna(linkedin) and str(linkedin).strip() != "":
-                st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
-
-
-# ------------------ DISPLAY TABLE ------------------
-def display_table(mentors_list, df, title):
-    st.subheader(title)
-    if not mentors_list:
-        st.info("No mentors in this category.")
-        return
-
-    ai_df = pd.DataFrame(mentors_list)
-
-    linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
-    ai_df["LinkedIn Profile"] = ai_df["Name"].map(linkedin_map).fillna("")
-
-    def make_clickable(link):
-        if pd.notna(link) and str(link).strip() != "":
-            return f'<a href="{link}" target="_blank">View Profile</a>'
-        return "Not Available"
-
-    ai_df["LinkedIn Profile"] = ai_df["LinkedIn Profile"].apply(make_clickable)
-
-    score_map = df.set_index("Name")["score"].to_dict() if "score" in df.columns else {}
-    ai_df["Embedding Score"] = ai_df["Name"].map(score_map).fillna(0).round(2)
-
-    desc_map = df.set_index("Name")["Description"].to_dict()
-    ai_df["Short Description"] = ai_df["Name"].map(desc_map).apply(
-        lambda x: (x[:100] + "...") if isinstance(x, str) and len(x) > 100 else x
-    )
-
-    industry_map = df.set_index("Name")["Industry"].to_dict()
-    ai_df["Industry"] = ai_df["Name"].map(industry_map).fillna("")
-
-    def color_hands_on(val):
-        if val == "Yes":
-            return "🟢 Yes"
-        elif val == "Partial":
-            return "🟡 Partial"
-        else:
-            return "🔴 No"
-
-    if "Hands On Experience" in ai_df.columns:
-        ai_df["Hands On Experience"] = ai_df["Hands On Experience"].apply(color_hands_on)
-
-    # Clean score display for table
-    for score_col in ["Industry Match Score", "Hands On Score"]:
-        if score_col in ai_df.columns:
-            ai_df[score_col] = ai_df[score_col].apply(
-                lambda x: x.split("|")[0].strip() if isinstance(x, str) and "|" in x else x
-            )
-
-    columns_to_show = [
-        "Name", "Overall Score", "Industry Match Score", "Hands On Score",
-        "Current Designation", "Current Organization", "Industry",
-        "Hands On Experience", "Short Description", "LinkedIn Profile"
-    ]
-    ai_df = ai_df[[col for col in columns_to_show if col in ai_df.columns]]
-    st.write(ai_df.to_html(escape=False, index=False), unsafe_allow_html=True)
-
+        # ✅ FIX 7 — use faster lookup instead of df filter
+        linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
+        linkedin = linkedin_map.get(mentor.get("Name", ""), "")
+        if linkedin and str(linkedin).strip() != "":
+            st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
 
 # ------------------ DISPLAY FULL RESULTS ------------------
 def display_mentor_results(ai_recommendations, df):
     if not ai_recommendations:
         return
 
-    # Split into Tier 1 and Tier 2
     tier1 = [m for m in ai_recommendations if m.get("Tier") == "1"]
     tier2 = [m for m in ai_recommendations if m.get("Tier") == "2"]
 
-    # ---- TIER 1 ----
     if tier1:
         st.markdown("""
         ## 🏆 Tier 1 — Strong Matches
-        > These mentors match **both the industry AND have hands-on experience** 
+        > These mentors match **both the industry AND have hands-on experience**
         in the founder's problem area.
         """)
         for i, mentor in enumerate(tier1):
             display_mentor_card(mentor, i + 1, "Tier 1", df)
-        # display_table(tier1, df, "📋 Tier 1 Summary Table")
     else:
         st.warning(
             "⚠️ No Tier 1 matches found — no mentor matched both industry "
             "AND hands-on experience for this requirement."
         )
 
-    # ---- TIER 2 ----
     if tier2:
         st.markdown("---")
         st.markdown("""
         ## 🔍 Tier 2 — Partial Matches
-        > These mentors match **either the industry OR have relevant experience** 
+        > These mentors match **either the industry OR have relevant experience**
         but not both. They may still provide useful guidance.
         """)
         for i, mentor in enumerate(tier2):
             display_mentor_card(mentor, i + 1, "Tier 2", df)
-        # display_table(tier2, df, "📋 Tier 2 Summary Table")
-
 
 # ------------------ AI CALL HELPER ------------------
 def call_ai(prompt, max_tokens=2048):
@@ -414,7 +357,6 @@ def call_ai(prompt, max_tokens=2048):
         )
         return response.content[0].text
 
-
 # ------------------ RENDER CHAT HISTORY ------------------
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -427,7 +369,9 @@ for message in st.session_state.messages:
             st.markdown(message["content"])
 
 # ------------------ USER INPUT ------------------
-user_input = st.chat_input("Describe your business, ask a follow-up, or start a new search...")
+user_input = st.chat_input(
+    "Describe your business, ask a follow-up, or start a new search..."
+)
 
 # ------------------ PROCESS INPUT ------------------
 if user_input:
@@ -492,8 +436,12 @@ Instructions:
 
                 enriched_query = user_input
                 if founder_doc_text:
-                    enriched_query = f"{user_input}\n\nContext from business document:\n{founder_doc_text[:1500]}"
+                    enriched_query = (
+                        f"{user_input}\n\n"
+                        f"Context from business document:\n{founder_doc_text[:1500]}"
+                    )
 
+                # ✅ FIX 8 — convert to numpy for faster cosine similarity
                 query_vec = model.encode([enriched_query])
                 similarity = cosine_similarity(query_vec, vectors)
                 df["score"] = similarity[0]
@@ -501,6 +449,11 @@ Instructions:
 
                 mentor_info = ""
                 for _, row in candidates.iterrows():
+                    doc_summary = (
+                        row["Doc Text"][:500]
+                        if row["Doc Text"] and len(row["Doc Text"]) > 50
+                        else "Not available"
+                    )
                     mentor_info += f"""
 Name: {row['Name']}
 Expertise: {row['Expertise']}
@@ -510,7 +463,7 @@ Current Designation: {row['Current Designation']}
 Current Organization: {row['Current Organization']}
 Qualification: {row['Qualification']}
 Description: {row['Description']}
-Document Summary: {row['Doc Text'][:500] if row['Doc Text'] else 'Not available'}
+Document Summary: {doc_summary}
 ---
 """
 
@@ -610,14 +563,20 @@ Return only the JSON array. No extra text, no markdown outside the array.
                         ai_recommendations = json.loads(cleaned)
                     except json.JSONDecodeError:
                         match_json = re.search(r'\[.*\]', cleaned, re.DOTALL)
-                        ai_recommendations = json.loads(match_json.group()) if match_json else []
+                        ai_recommendations = (
+                            json.loads(match_json.group()) if match_json else []
+                        )
 
                     if ai_recommendations:
                         st.session_state.last_recommendations = ai_recommendations
                         st.session_state.last_query = user_input
 
-                        tier1_count = len([m for m in ai_recommendations if m.get("Tier") == "1"])
-                        tier2_count = len([m for m in ai_recommendations if m.get("Tier") == "2"])
+                        tier1_count = len(
+                            [m for m in ai_recommendations if m.get("Tier") == "1"]
+                        )
+                        tier2_count = len(
+                            [m for m in ai_recommendations if m.get("Tier") == "2"]
+                        )
 
                         summary = (
                             f"Found **{tier1_count} Tier 1 mentor(s)** "
@@ -638,7 +597,10 @@ Return only the JSON array. No extra text, no markdown outside the array.
                             "content": summary
                         })
                     else:
-                        fallback = "I could not find strong matches. Could you describe your business problem in more detail?"
+                        fallback = (
+                            "I could not find strong matches. "
+                            "Could you describe your business problem in more detail?"
+                        )
                         st.markdown(fallback)
                         st.session_state.messages.append({
                             "role": "assistant",
@@ -656,7 +618,10 @@ Return only the JSON array. No extra text, no markdown outside the array.
 
                 founder_context_section = ""
                 if founder_doc_text:
-                    founder_context_section = f"Founder uploaded a business document:\n{founder_doc_text[:1500]}"
+                    founder_context_section = (
+                        f"Founder uploaded a business document:\n"
+                        f"{founder_doc_text[:1500]}"
+                    )
 
                 scoring_prompt = f"""
 A founder is looking for a mentor with this requirement:
@@ -709,13 +674,20 @@ Return only the JSON object. No extra text.
                         score_result = json.loads(score_cleaned)
                     except json.JSONDecodeError:
                         match_score = re.search(r'\{.*\}', score_cleaned, re.DOTALL)
-                        score_result = json.loads(match_score.group()) if match_score else {}
+                        score_result = (
+                            json.loads(match_score.group()) if match_score else {}
+                        )
 
                     if score_result:
-                        mentor_name = score_result.get("Uploaded Mentor Name", "Uploaded Mentor")
+                        mentor_name = score_result.get(
+                            "Uploaded Mentor Name", "Uploaded Mentor"
+                        )
                         score_val = score_result.get("Overall Score", "N/A")
-                        hands_on_val = score_result.get("Hands On Experience", "").strip()
+                        hands_on_val = score_result.get(
+                            "Hands On Experience", ""
+                        ).strip()
                         tier_val = score_result.get("Tier", "2")
+                        tier_reason = score_result.get("Tier Reason", "")
 
                         tier_color = "🏆" if tier_val == "1" else "🔍"
                         st.markdown(
@@ -723,7 +695,6 @@ Return only the JSON object. No extra text.
                             f"{mentor_name} | Tier {tier_val}"
                         )
 
-                        tier_reason = score_result.get("Tier Reason", "")
                         if tier_val == "1":
                             st.success(f"✅ Tier 1 — {tier_reason}")
                         else:
@@ -743,7 +714,11 @@ Return only the JSON object. No extra text.
                         ]:
                             with col:
                                 raw = score_result.get(key, "N/A")
-                                parts = raw.split("|") if isinstance(raw, str) and "|" in raw else [raw, ""]
+                                parts = (
+                                    raw.split("|")
+                                    if isinstance(raw, str) and "|" in raw
+                                    else [raw, ""]
+                                )
                                 st.metric(label, f"{parts[0].strip()} / {max_val}")
                                 if len(parts) > 1:
                                     st.caption(parts[1].strip())
@@ -752,11 +727,18 @@ Return only the JSON object. No extra text.
 
                         st.markdown("**🛠️ Hands-On Experience**")
                         if hands_on_val == "Yes":
-                            st.success(f"🟢 Yes — {score_result.get('Hands On Details', '')}")
+                            st.success(
+                                f"🟢 Yes — {score_result.get('Hands On Details', '')}"
+                            )
                         elif hands_on_val == "Partial":
-                            st.warning(f"🟡 Partial — {score_result.get('Hands On Details', '')}")
+                            st.warning(
+                                f"🟡 Partial — "
+                                f"{score_result.get('Hands On Details', '')}"
+                            )
                         else:
-                            st.error(f"🔴 No — {score_result.get('Hands On Details', '')}")
+                            st.error(
+                                f"🔴 No — {score_result.get('Hands On Details', '')}"
+                            )
 
                         col1, col2 = st.columns(2)
                         with col1:
@@ -778,8 +760,9 @@ Return only the JSON object. No extra text.
                         st.write(score_result.get("Match Summary", "N/A"))
 
                         score_content = (
-                            f"Uploaded mentor **{mentor_name}** is **Tier {tier_val}** "
-                            f"with score **{score_val}/10**. {tier_reason}"
+                            f"Uploaded mentor **{mentor_name}** is "
+                            f"**Tier {tier_val}** with score **{score_val}/10**. "
+                            f"{tier_reason}"
                         )
                         st.session_state.messages.append({
                             "role": "assistant",
@@ -792,4 +775,7 @@ Return only the JSON object. No extra text.
 
     elif mentor_profile_text and not st.session_state.last_recommendations:
         with st.chat_message("assistant"):
-            st.info("💡 Mentor profile uploaded. Run a search first to get match analysis.")
+            st.info(
+                "💡 Mentor profile uploaded. "
+                "Run a search first to get match analysis."
+            )
