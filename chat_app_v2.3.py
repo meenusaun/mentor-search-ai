@@ -173,9 +173,9 @@ model = load_model()
 # ------------------ CREATE VECTORS ------------------
 @st.cache_data
 def get_vectors(texts):
-    return model.encode(texts)
+    return model.encode(texts, batch_size=64, show_progress_bar=False)
 
-vectors = get_vectors(df["combined"])
+vectors = get_vectors(df["combined"].tolist())
 
 # ------------------ EXTRACT UPLOADED FILE TEXTS ------------------
 founder_doc_text = ""
