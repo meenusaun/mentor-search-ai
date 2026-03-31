@@ -74,6 +74,9 @@ if st.sidebar.button("🗑️ Clear Chat History"):
     st.session_state.last_query = ""
     st.rerun()
 
+if st.sidebar.button("🔄 Reload Mentor Data"):
+    st.cache_data.clear()
+    st.rerun()
 # ------------------ DOCUMENT EXTRACTION UTILS ------------------
 def extract_text_from_pdf_bytes(file_bytes):
     text = ""
@@ -161,18 +164,24 @@ def load_data():
         lambda x: "✅ Yes" if x and len(x) > 50 else "❌ No"
     )
 
-    df["combined"] = (
-        "Expertise: " + df["Expertise"] + ". " +
-        "Secondary Expertise: " + df["Secondary Expertise"] + ". " +
-        "Industry: " + df["Industry"] + ". " +
-        "Secondary Industry: " + df["Secondary Industry"] + ". " +
-        "Description: " + df["Description"] + ". " +
-        "Tags: " + df["Expertise Tags"] + " " + df["Industry Tags"] + ". " +
-        "Qualification: " + df["Qualification"] + ". " +
-        "Current Organization: " + df["Current Organization"] + ". " +
-        "Current Designation: " + df["Current Designation"] + ". " +
-        "Document: " + df["Doc Text"].str[:1000]
-    )
+    def build_combined(row):
+        parts = [
+        f"Expertise: {row['Expertise']}",
+        f"Secondary Expertise: {row['Secondary Expertise']}",
+        f"Industry: {row['Industry']}",
+        f"Secondary Industry: {row['Secondary Industry']}",
+        f"Description: {row['Description']}",
+        f"Tags: {row['Expertise Tags']} {row['Industry Tags']}",
+        f"Qualification: {row['Qualification']}",
+        f"Current Organization: {row['Current Organization']}",
+        f"Current Designation: {row['Current Designation']}",
+    ]
+    # Only add Doc Text if it actually has content
+    if row["Doc Text"] and len(row["Doc Text"]) > 50:
+        parts.append(f"Document: {row['Doc Text'][:1000]}")
+    return ". ".join(parts)
+
+    df["combined"] = df.apply(build_combined, axis=1)
     return df
 
 df = load_data()
