@@ -1,4 +1,3 @@
-#--------------READING LINKEDIN PROFILE PDFs---------------------------
 import streamlit as st
 import pandas as pd
 from sentence_transformers import SentenceTransformer
@@ -66,7 +65,7 @@ mentor_uploaded_file = st.sidebar.file_uploader(
     key="mentor_profile"
 )
 
-# ------------------ CLEAR CHAT BUTTON ------------------
+# ------------------ CLEAR CHAT + RELOAD BUTTONS ------------------
 st.sidebar.markdown("---")
 if st.sidebar.button("🗑️ Clear Chat History"):
     st.session_state.messages = []
@@ -76,7 +75,9 @@ if st.sidebar.button("🗑️ Clear Chat History"):
 
 if st.sidebar.button("🔄 Reload Mentor Data"):
     st.cache_data.clear()
+    st.cache_resource.clear()
     st.rerun()
+
 # ------------------ DOCUMENT EXTRACTION UTILS ------------------
 def extract_text_from_pdf_bytes(file_bytes):
     text = ""
@@ -87,7 +88,7 @@ def extract_text_from_pdf_bytes(file_bytes):
                 if page_text:
                     text += page_text + "\n"
     except Exception as e:
-        text = f"[PDF extraction error: {e}]"
+        text = ""
     return text.strip()
 
 def extract_text_from_docx_bytes(file_bytes):
@@ -97,7 +98,7 @@ def extract_text_from_docx_bytes(file_bytes):
         for para in doc.paragraphs:
             text += para.text + "\n"
     except Exception as e:
-        text = f"[DOCX extraction error: {e}]"
+        text = ""
     return text.strip()
 
 def extract_text_from_uploaded_file(uploaded_file):
@@ -120,16 +121,14 @@ def extract_text_from_file_path(file_path):
     if not file_path or not isinstance(file_path, str) or file_path.strip() == "":
         return ""
     file_path = file_path.strip()
-    file_path = os.path.normpath(file_path)
-
-    if not os.path.exists(file_path):
-        relative = os.path.join(os.getcwd(), file_path)
-        if os.path.exists(relative):
-            file_path = relative
-        else:
-            return ""
-
     try:
+        file_path = os.path.normpath(file_path)
+        if not os.path.exists(file_path):
+            relative = os.path.join(os.getcwd(), file_path)
+            if os.path.exists(relative):
+                file_path = relative
+            else:
+                return ""
         if file_path.lower().endswith(".pdf"):
             with open(file_path, "rb") as f:
                 return extract_text_from_pdf_bytes(f.read())
@@ -139,7 +138,7 @@ def extract_text_from_file_path(file_path):
         elif file_path.lower().endswith(".txt"):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
-    except Exception as e:
+    except Exception:
         return ""
     return ""
 
@@ -158,28 +157,30 @@ def load_data():
             df[col] = ""
         df[col] = df[col].fillna("").astype(str)
 
+    # Extract text from mentor PDFs — silently skip if not available
     df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
 
+    # PDF availability flag
     df["PDF Available"] = df["Doc Text"].apply(
         lambda x: "✅ Yes" if x and len(x) > 50 else "❌ No"
     )
 
+    # ✅ FIXED — Only include Doc Text in combined if it actually has content
     def build_combined(row):
         parts = [
-        f"Expertise: {row['Expertise']}",
-        f"Secondary Expertise: {row['Secondary Expertise']}",
-        f"Industry: {row['Industry']}",
-        f"Secondary Industry: {row['Secondary Industry']}",
-        f"Description: {row['Description']}",
-        f"Tags: {row['Expertise Tags']} {row['Industry Tags']}",
-        f"Qualification: {row['Qualification']}",
-        f"Current Organization: {row['Current Organization']}",
-        f"Current Designation: {row['Current Designation']}",
-    ]
-    # Only add Doc Text if it actually has content
-    if row["Doc Text"] and len(row["Doc Text"]) > 50:
-        parts.append(f"Document: {row['Doc Text'][:1000]}")
-    return ". ".join(parts)
+            f"Expertise: {row['Expertise']}",
+            f"Secondary Expertise: {row['Secondary Expertise']}",
+            f"Industry: {row['Industry']}",
+            f"Secondary Industry: {row['Secondary Industry']}",
+            f"Description: {row['Description']}",
+            f"Tags: {row['Expertise Tags']} {row['Industry Tags']}",
+            f"Qualification: {row['Qualification']}",
+            f"Current Organization: {row['Current Organization']}",
+            f"Current Designation: {row['Current Designation']}",
+        ]
+        if row["Doc Text"] and len(row["Doc Text"]) > 50:
+            parts.append(f"Document: {row['Doc Text'][:1000]}")
+        return ". ".join(parts)
 
     df["combined"] = df.apply(build_combined, axis=1)
     return df
@@ -203,10 +204,10 @@ model = load_model()
 
 # ------------------ CREATE VECTORS ------------------
 @st.cache_data
-def get_vectors(texts):
-    return model.encode(texts)
+def get_vectors(_model, texts):
+    return _model.encode(texts)
 
-vectors = get_vectors(df["combined"])
+vectors = get_vectors(model, df["combined"].tolist())
 
 # ------------------ EXTRACT UPLOADED FILE TEXTS ------------------
 founder_doc_text = ""
