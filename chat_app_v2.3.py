@@ -1,5 +1,4 @@
-# Including reading of Linkedin PDF files
-
+#--------------READING LINKEDIN PROFILE PDFs---------------------------
 import streamlit as st
 import pandas as pd
 from sentence_transformers import SentenceTransformer
@@ -115,21 +114,17 @@ def extract_text_from_uploaded_file(uploaded_file):
     return ""
 
 def extract_text_from_file_path(file_path):
-    """Extract text from local file path — supports full absolute paths and relative paths."""
     if not file_path or not isinstance(file_path, str) or file_path.strip() == "":
         return ""
     file_path = file_path.strip()
-
-    # Normalize path separators for Windows/Mac/Linux
     file_path = os.path.normpath(file_path)
 
     if not os.path.exists(file_path):
-        # Try relative path from current working directory
         relative = os.path.join(os.getcwd(), file_path)
         if os.path.exists(relative):
             file_path = relative
         else:
-            return f"[File not found: {file_path}]"
+            return ""
 
     try:
         if file_path.lower().endswith(".pdf"):
@@ -142,7 +137,7 @@ def extract_text_from_file_path(file_path):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
     except Exception as e:
-        return f"[File read error: {e}]"
+        return ""
     return ""
 
 # ------------------ LOAD DATA ------------------
@@ -160,12 +155,10 @@ def load_data():
             df[col] = ""
         df[col] = df[col].fillna("").astype(str)
 
-    # Extract text from mentor PDFs
     df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
 
-    # Flag PDF availability
     df["PDF Available"] = df["Doc Text"].apply(
-        lambda x: "✅ Yes" if x and not x.startswith("[") else "❌ No"
+        lambda x: "✅ Yes" if x and len(x) > 50 else "❌ No"
     )
 
     df["combined"] = (
@@ -279,7 +272,11 @@ def display_mentor_card(mentor, index, df):
         ]:
             with col:
                 raw = mentor.get(key, "N/A")
-                parts = raw.split("|") if isinstance(raw, str) and "|" in raw else [raw, ""]
+                parts = (
+                    raw.split("|")
+                    if isinstance(raw, str) and "|" in raw
+                    else [raw, ""]
+                )
                 st.metric(label, f"{parts[0].strip()} / {max_val}")
                 if len(parts) > 1:
                     st.caption(parts[1].strip())
@@ -312,7 +309,7 @@ def display_mentor_card(mentor, index, df):
         else:
             st.error(f"❌ No Direct Experience — {mentor.get('Hands On Details', '')}")
 
-        # PDF availability indicator
+        # PDF + LinkedIn
         matched_row = df[df["Name"] == mentor.get("Name")]
         if not matched_row.empty:
             pdf_status = matched_row.iloc[0].get("PDF Available", "❌ No")
@@ -320,69 +317,6 @@ def display_mentor_card(mentor, index, df):
             linkedin = matched_row.iloc[0].get("LinkedIn", "")
             if pd.notna(linkedin) and str(linkedin).strip() != "":
                 st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
-
-# ------------------ DISPLAY TABLE ------------------
-def display_table(mentors_list, df, title):
-    st.subheader(title)
-    if not mentors_list:
-        st.info("No mentors in this category.")
-        return
-
-    ai_df = pd.DataFrame(mentors_list)
-
-    linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
-    ai_df["LinkedIn Profile"] = ai_df["Name"].map(linkedin_map).fillna("")
-
-    def make_clickable(link):
-        if pd.notna(link) and str(link).strip() != "":
-            return f'<a href="{link}" target="_blank">View Profile</a>'
-        return "Not Available"
-
-    ai_df["LinkedIn Profile"] = ai_df["LinkedIn Profile"].apply(make_clickable)
-
-    # PDF status from df
-    pdf_map = df.set_index("Name")["PDF Available"].to_dict()
-    ai_df["PDF Profile"] = ai_df["Name"].map(pdf_map).fillna("❌ No")
-
-    score_map = df.set_index("Name")["score"].to_dict() if "score" in df.columns else {}
-    ai_df["Embedding Score"] = ai_df["Name"].map(score_map).fillna(0).round(2)
-
-    desc_map = df.set_index("Name")["Description"].to_dict()
-    ai_df["Short Description"] = ai_df["Name"].map(desc_map).apply(
-        lambda x: (x[:100] + "...") if isinstance(x, str) and len(x) > 100 else x
-    )
-
-    industry_map = df.set_index("Name")["Industry"].to_dict()
-    ai_df["Industry"] = ai_df["Name"].map(industry_map).fillna("")
-
-    def color_hands_on(val):
-        if val == "Yes":
-            return "🟢 Yes"
-        elif val == "Partial":
-            return "🟡 Partial"
-        else:
-            return "🔴 No"
-
-    if "Hands On Experience" in ai_df.columns:
-        ai_df["Hands On Experience"] = ai_df["Hands On Experience"].apply(
-            color_hands_on
-        )
-
-    # Clean score display for table
-    for score_col in ["Industry Match Score", "Hands On Score"]:
-        if score_col in ai_df.columns:
-            ai_df[score_col] = ai_df[score_col].apply(
-                lambda x: x.split("|")[0].strip()
-                if isinstance(x, str) and "|" in x else x
-            )
-
-    columns_to_show = [
-        "Name", "Overall Score", "Industry Match Score", "Hands On Score",
-        "Current Designation", "Current Organization", "Industry",
-        "Hands On Experience", "PDF Profile", "Short Description", "LinkedIn Profile"
-    ]
-    ai_df = ai_df[[col for col in columns_to_show if col in ai_df.columns]]
-    st.write(ai_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
 # ------------------ DISPLAY FULL RESULTS ------------------
 def display_mentor_results(ai_recommendations, df):
@@ -401,7 +335,6 @@ def display_mentor_results(ai_recommendations, df):
         """)
         for i, mentor in enumerate(tier1):
             display_mentor_card(mentor, i + 1, df)
-        display_table(tier1, df, "📋 Tier 1 Summary Table")
     else:
         st.warning(
             "⚠️ No Tier 1 matches found — no mentor matched both industry "
@@ -418,7 +351,6 @@ def display_mentor_results(ai_recommendations, df):
         """)
         for i, mentor in enumerate(tier2):
             display_mentor_card(mentor, i + 1, df)
-        display_table(tier2, df, "📋 Tier 2 Summary Table")
 
 # ------------------ AI CALL HELPER ------------------
 def call_ai(prompt, max_tokens=2048):
@@ -527,12 +459,11 @@ Instructions:
 
                 mentor_info = ""
                 for _, row in candidates.iterrows():
-                    doc_summary = ""
-                    if row["Doc Text"] and not row["Doc Text"].startswith("["):
-                        doc_summary = row["Doc Text"][:500]
-                    else:
-                        doc_summary = "Not available"
-
+                    doc_summary = (
+                        row["Doc Text"][:500]
+                        if row["Doc Text"] and len(row["Doc Text"]) > 50
+                        else "Not available"
+                    )
                     mentor_info += f"""
 Name: {row['Name']}
 Expertise: {row['Expertise']}
@@ -699,7 +630,8 @@ Return only the JSON array. No extra text, no markdown outside the array.
                 founder_context_section = ""
                 if founder_doc_text:
                     founder_context_section = (
-                        f"Founder uploaded a business document:\n{founder_doc_text[:1500]}"
+                        f"Founder uploaded a business document:\n"
+                        f"{founder_doc_text[:1500]}"
                     )
 
                 scoring_prompt = f"""
@@ -762,7 +694,9 @@ Return only the JSON object. No extra text.
                             "Uploaded Mentor Name", "Uploaded Mentor"
                         )
                         score_val = score_result.get("Overall Score", "N/A")
-                        hands_on_val = score_result.get("Hands On Experience", "").strip()
+                        hands_on_val = score_result.get(
+                            "Hands On Experience", ""
+                        ).strip()
                         tier_val = score_result.get("Tier", "2")
                         tier_reason = score_result.get("Tier Reason", "")
 
@@ -809,7 +743,8 @@ Return only the JSON object. No extra text.
                             )
                         elif hands_on_val == "Partial":
                             st.warning(
-                                f"🟡 Partial — {score_result.get('Hands On Details', '')}"
+                                f"🟡 Partial — "
+                                f"{score_result.get('Hands On Details', '')}"
                             )
                         else:
                             st.error(
@@ -836,8 +771,9 @@ Return only the JSON object. No extra text.
                         st.write(score_result.get("Match Summary", "N/A"))
 
                         score_content = (
-                            f"Uploaded mentor **{mentor_name}** is **Tier {tier_val}** "
-                            f"with score **{score_val}/10**. {tier_reason}"
+                            f"Uploaded mentor **{mentor_name}** is "
+                            f"**Tier {tier_val}** with score **{score_val}/10**. "
+                            f"{tier_reason}"
                         )
                         st.session_state.messages.append({
                             "role": "assistant",
