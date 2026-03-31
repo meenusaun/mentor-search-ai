@@ -65,17 +65,12 @@ mentor_uploaded_file = st.sidebar.file_uploader(
     key="mentor_profile"
 )
 
-# ------------------ CLEAR CHAT + RELOAD BUTTONS ------------------
+# ------------------ CLEAR CHAT BUTTON ------------------
 st.sidebar.markdown("---")
 if st.sidebar.button("🗑️ Clear Chat History"):
     st.session_state.messages = []
     st.session_state.last_recommendations = []
     st.session_state.last_query = ""
-    st.rerun()
-
-if st.sidebar.button("🔄 Reload Mentor Data"):
-    st.cache_data.clear()
-    st.cache_resource.clear()
     st.rerun()
 
 # ------------------ DOCUMENT EXTRACTION UTILS ------------------
@@ -87,8 +82,8 @@ def extract_text_from_pdf_bytes(file_bytes):
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
-    except Exception:
-        text = ""
+    except Exception as e:
+        text = f"[PDF extraction error: {e}]"
     return text.strip()
 
 def extract_text_from_docx_bytes(file_bytes):
@@ -97,8 +92,8 @@ def extract_text_from_docx_bytes(file_bytes):
         doc = docx.Document(BytesIO(file_bytes))
         for para in doc.paragraphs:
             text += para.text + "\n"
-    except Exception:
-        text = ""
+    except Exception as e:
+        text = f"[DOCX extraction error: {e}]"
     return text.strip()
 
 def extract_text_from_uploaded_file(uploaded_file):
@@ -122,13 +117,6 @@ def extract_text_from_file_path(file_path):
         return ""
     file_path = file_path.strip()
     try:
-        file_path = os.path.normpath(file_path)
-        if not os.path.exists(file_path):
-            relative = os.path.join(os.getcwd(), file_path)
-            if os.path.exists(relative):
-                file_path = relative
-            else:
-                return ""
         if file_path.lower().endswith(".pdf"):
             with open(file_path, "rb") as f:
                 return extract_text_from_pdf_bytes(f.read())
@@ -138,8 +126,8 @@ def extract_text_from_file_path(file_path):
         elif file_path.lower().endswith(".txt"):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
-    except Exception:
-        return ""
+    except Exception as e:
+        return f"[File read error: {e}]"
     return ""
 
 # ------------------ LOAD DATA ------------------
@@ -159,39 +147,21 @@ def load_data():
 
     df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
 
-    df["PDF Available"] = df["Doc Text"].apply(
-        lambda x: "✅ Yes" if x and len(x) > 50 else "❌ No"
+    df["combined"] = (
+        "Expertise: " + df["Expertise"] + ". " +
+        "Secondary Expertise: " + df["Secondary Expertise"] + ". " +
+        "Industry: " + df["Industry"] + ". " +
+        "Secondary Industry: " + df["Secondary Industry"] + ". " +
+        "Description: " + df["Description"] + ". " +
+        "Tags: " + df["Expertise Tags"] + " " + df["Industry Tags"] + ". " +
+        "Qualification: " + df["Qualification"] + ". " +
+        "Current Organization: " + df["Current Organization"] + ". " +
+        "Current Designation: " + df["Current Designation"] + ". " +
+        "Document: " + df["Doc Text"].str[:1000]
     )
-
-    # Only include Doc Text in combined if it has real content
-    def build_combined(row):
-        parts = [
-            f"Expertise: {row['Expertise']}",
-            f"Secondary Expertise: {row['Secondary Expertise']}",
-            f"Industry: {row['Industry']}",
-            f"Secondary Industry: {row['Secondary Industry']}",
-            f"Description: {row['Description']}",
-            f"Tags: {row['Expertise Tags']} {row['Industry Tags']}",
-            f"Qualification: {row['Qualification']}",
-            f"Current Organization: {row['Current Organization']}",
-            f"Current Designation: {row['Current Designation']}",
-        ]
-        if row["Doc Text"] and len(row["Doc Text"]) > 50:
-            parts.append(f"Document: {row['Doc Text'][:1000]}")
-        return ". ".join(parts)
-
-    df["combined"] = df.apply(build_combined, axis=1)
     return df
 
 df = load_data()
-
-# ------------------ PDF LOAD STATUS IN SIDEBAR ------------------
-total_mentors = len(df)
-pdf_loaded = len(df[df["PDF Available"] == "✅ Yes"])
-st.sidebar.markdown("---")
-st.sidebar.subheader("📊 PDF Profile Status")
-st.sidebar.progress(pdf_loaded / total_mentors if total_mentors > 0 else 0)
-st.sidebar.caption(f"✅ {pdf_loaded} of {total_mentors} mentor PDFs loaded")
 
 # ------------------ LOAD MODEL ------------------
 @st.cache_resource
@@ -205,7 +175,7 @@ model = load_model()
 def get_vectors(texts):
     return model.encode(texts)
 
-vectors = get_vectors(df["combined"].tolist())
+vectors = get_vectors(df["combined"])
 
 # ------------------ EXTRACT UPLOADED FILE TEXTS ------------------
 founder_doc_text = ""
@@ -244,13 +214,11 @@ def detect_intent(user_input, last_recommendations):
     ]
     input_lower = user_input.lower()
     has_recommendations = len(last_recommendations) > 0
-    is_followup = has_recommendations and any(
-        kw in input_lower for kw in followup_keywords
-    )
+    is_followup = has_recommendations and any(kw in input_lower for kw in followup_keywords)
     return "followup" if is_followup else "new_search"
 
 # ------------------ DISPLAY SINGLE MENTOR CARD ------------------
-def display_mentor_card(mentor, index, df):
+def display_mentor_card(mentor, index, tier_label, df):
     hands_on = mentor.get("Hands On Experience", "").strip()
     if hands_on == "Yes":
         badge = "🟢 Hands-On"
@@ -272,25 +240,37 @@ def display_mentor_card(mentor, index, df):
         st.markdown("### 📊 Match Scorecard")
         sc1, sc2, sc3, sc4 = st.columns(4)
 
-        for col, key, label, max_val in [
-            (sc1, "Industry Match Score", "🏭 Industry Match", "3"),
-            (sc2, "Hands On Score", "🛠️ Hands-On Exp", "3"),
-            (sc3, "Expertise Score", "💼 Expertise", "2"),
-            (sc4, "Credibility Score", "🎓 Credibility", "2"),
-        ]:
-            with col:
-                raw = mentor.get(key, "N/A")
-                parts = (
-                    raw.split("|")
-                    if isinstance(raw, str) and "|" in raw
-                    else [raw, ""]
-                )
-                st.metric(label, f"{parts[0].strip()} / {max_val}")
-                if len(parts) > 1:
-                    st.caption(parts[1].strip())
+        with sc1:
+            industry_score = mentor.get("Industry Match Score", "N/A")
+            parts = industry_score.split("|") if isinstance(industry_score, str) and "|" in industry_score else [industry_score, ""]
+            st.metric("🏭 Industry Match", f"{parts[0].strip()} / 3")
+            if len(parts) > 1:
+                st.caption(parts[1].strip())
+
+        with sc2:
+            hands_on_score = mentor.get("Hands On Score", "N/A")
+            parts = hands_on_score.split("|") if isinstance(hands_on_score, str) and "|" in hands_on_score else [hands_on_score, ""]
+            st.metric("🛠️ Hands-On Exp", f"{parts[0].strip()} / 3")
+            if len(parts) > 1:
+                st.caption(parts[1].strip())
+
+        with sc3:
+            expertise_score = mentor.get("Expertise Score", "N/A")
+            parts = expertise_score.split("|") if isinstance(expertise_score, str) and "|" in expertise_score else [expertise_score, ""]
+            st.metric("💼 Expertise", f"{parts[0].strip()} / 2")
+            if len(parts) > 1:
+                st.caption(parts[1].strip())
+
+        with sc4:
+            cred_score = mentor.get("Credibility Score", "N/A")
+            parts = cred_score.split("|") if isinstance(cred_score, str) and "|" in cred_score else [cred_score, ""]
+            st.metric("🎓 Credibility", f"{parts[0].strip()} / 2")
+            if len(parts) > 1:
+                st.caption(parts[1].strip())
 
         st.markdown("---")
 
+        # ---- PROFILE INFO ----
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**🎓 Qualification**")
@@ -318,17 +298,74 @@ def display_mentor_card(mentor, index, df):
 
         matched_row = df[df["Name"] == mentor.get("Name")]
         if not matched_row.empty:
-            pdf_status = matched_row.iloc[0].get("PDF Available", "❌ No")
-            st.caption(f"📄 PDF Profile: {pdf_status}")
             linkedin = matched_row.iloc[0].get("LinkedIn", "")
             if pd.notna(linkedin) and str(linkedin).strip() != "":
                 st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
 
-# ------------------ DISPLAY FULL RESULTS — NO TABLES ------------------
+
+# ------------------ DISPLAY TABLE ------------------
+def display_table(mentors_list, df, title):
+    st.subheader(title)
+    if not mentors_list:
+        st.info("No mentors in this category.")
+        return
+
+    ai_df = pd.DataFrame(mentors_list)
+
+    linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
+    ai_df["LinkedIn Profile"] = ai_df["Name"].map(linkedin_map).fillna("")
+
+    def make_clickable(link):
+        if pd.notna(link) and str(link).strip() != "":
+            return f'<a href="{link}" target="_blank">View Profile</a>'
+        return "Not Available"
+
+    ai_df["LinkedIn Profile"] = ai_df["LinkedIn Profile"].apply(make_clickable)
+
+    score_map = df.set_index("Name")["score"].to_dict() if "score" in df.columns else {}
+    ai_df["Embedding Score"] = ai_df["Name"].map(score_map).fillna(0).round(2)
+
+    desc_map = df.set_index("Name")["Description"].to_dict()
+    ai_df["Short Description"] = ai_df["Name"].map(desc_map).apply(
+        lambda x: (x[:100] + "...") if isinstance(x, str) and len(x) > 100 else x
+    )
+
+    industry_map = df.set_index("Name")["Industry"].to_dict()
+    ai_df["Industry"] = ai_df["Name"].map(industry_map).fillna("")
+
+    def color_hands_on(val):
+        if val == "Yes":
+            return "🟢 Yes"
+        elif val == "Partial":
+            return "🟡 Partial"
+        else:
+            return "🔴 No"
+
+    if "Hands On Experience" in ai_df.columns:
+        ai_df["Hands On Experience"] = ai_df["Hands On Experience"].apply(color_hands_on)
+
+    # Clean score display for table
+    for score_col in ["Industry Match Score", "Hands On Score"]:
+        if score_col in ai_df.columns:
+            ai_df[score_col] = ai_df[score_col].apply(
+                lambda x: x.split("|")[0].strip() if isinstance(x, str) and "|" in x else x
+            )
+
+    columns_to_show = [
+        "Name", "Overall Score", "Industry Match Score", "Hands On Score",
+        "Current Designation", "Current Organization", "Industry",
+        "Hands On Experience", "Short Description", "LinkedIn Profile"
+    ]
+    ai_df = ai_df[[col for col in columns_to_show if col in ai_df.columns]]
+    st.write(ai_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+
+# ------------------ DISPLAY FULL RESULTS ------------------
 def display_mentor_results(ai_recommendations, df):
     if not ai_recommendations:
         return
 
+    # Split into Tier 1 and Tier 2
     tier1 = [m for m in ai_recommendations if m.get("Tier") == "1"]
     tier2 = [m for m in ai_recommendations if m.get("Tier") == "2"]
 
@@ -336,11 +373,12 @@ def display_mentor_results(ai_recommendations, df):
     if tier1:
         st.markdown("""
         ## 🏆 Tier 1 — Strong Matches
-        > These mentors match **both the industry AND have hands-on experience**
+        > These mentors match **both the industry AND have hands-on experience** 
         in the founder's problem area.
         """)
         for i, mentor in enumerate(tier1):
-            display_mentor_card(mentor, i + 1, df)
+            display_mentor_card(mentor, i + 1, "Tier 1", df)
+        # display_table(tier1, df, "📋 Tier 1 Summary Table")
     else:
         st.warning(
             "⚠️ No Tier 1 matches found — no mentor matched both industry "
@@ -352,11 +390,13 @@ def display_mentor_results(ai_recommendations, df):
         st.markdown("---")
         st.markdown("""
         ## 🔍 Tier 2 — Partial Matches
-        > These mentors match **either the industry OR have relevant experience**
+        > These mentors match **either the industry OR have relevant experience** 
         but not both. They may still provide useful guidance.
         """)
         for i, mentor in enumerate(tier2):
-            display_mentor_card(mentor, i + 1, df)
+            display_mentor_card(mentor, i + 1, "Tier 2", df)
+        # display_table(tier2, df, "📋 Tier 2 Summary Table")
+
 
 # ------------------ AI CALL HELPER ------------------
 def call_ai(prompt, max_tokens=2048):
@@ -374,6 +414,7 @@ def call_ai(prompt, max_tokens=2048):
         )
         return response.content[0].text
 
+
 # ------------------ RENDER CHAT HISTORY ------------------
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -386,9 +427,7 @@ for message in st.session_state.messages:
             st.markdown(message["content"])
 
 # ------------------ USER INPUT ------------------
-user_input = st.chat_input(
-    "Describe your business, ask a follow-up, or start a new search..."
-)
+user_input = st.chat_input("Describe your business, ask a follow-up, or start a new search...")
 
 # ------------------ PROCESS INPUT ------------------
 if user_input:
@@ -453,10 +492,7 @@ Instructions:
 
                 enriched_query = user_input
                 if founder_doc_text:
-                    enriched_query = (
-                        f"{user_input}\n\n"
-                        f"Context from business document:\n{founder_doc_text[:1500]}"
-                    )
+                    enriched_query = f"{user_input}\n\nContext from business document:\n{founder_doc_text[:1500]}"
 
                 query_vec = model.encode([enriched_query])
                 similarity = cosine_similarity(query_vec, vectors)
@@ -465,11 +501,6 @@ Instructions:
 
                 mentor_info = ""
                 for _, row in candidates.iterrows():
-                    doc_summary = (
-                        row["Doc Text"][:500]
-                        if row["Doc Text"] and len(row["Doc Text"]) > 50
-                        else "Not available"
-                    )
                     mentor_info += f"""
 Name: {row['Name']}
 Expertise: {row['Expertise']}
@@ -479,7 +510,7 @@ Current Designation: {row['Current Designation']}
 Current Organization: {row['Current Organization']}
 Qualification: {row['Qualification']}
 Description: {row['Description']}
-PDF Profile Summary: {doc_summary}
+Document Summary: {row['Doc Text'][:500] if row['Doc Text'] else 'Not available'}
 ---
 """
 
@@ -511,26 +542,26 @@ Here are mentor profiles to evaluate:
 
 TIER CLASSIFICATION RULES — This is the most important part:
 
-TIER 1 — Strong Match (minimum 1, maximum 5):
+TIER 1 — Strong Match (show minimum 1, maximum 5):
 A mentor qualifies for Tier 1 ONLY if BOTH conditions are true:
-  ✅ Condition 1 — Industry Match: The mentor has directly worked IN the same
-     or very closely related industry as the founder's business. Not just advised
+  ✅ Condition 1 — Industry Match: The mentor has directly worked IN the same 
+     or very closely related industry as the founder's business. Not just advised 
      — actually worked in it as an operator, founder, or senior leader.
-  ✅ Condition 2 — Hands-On Experience: The mentor has PERSONALLY done the
-     specific task or solved the specific problem the founder is facing.
-     Not consulting, not teaching — actually done it themselves on the ground.
+  ✅ Condition 2 — Hands-On Experience: The mentor has PERSONALLY done the 
+     specific task or solved the specific problem the founder is facing. 
+     Not consulting, not teaching, not advising — actually done it themselves.
 
 If even ONE condition is missing → mentor goes to Tier 2, NOT Tier 1.
-Be strict. It is better to show 1 Tier 1 mentor than incorrectly promote
-a weak match to Tier 1.
+Be strict. It is better to show 1 Tier 1 mentor than to incorrectly 
+promote a weak match to Tier 1.
 
 TIER 2 — Partial Match (maximum 5):
 Mentors who meet at least ONE of the following:
   - Matches the industry but lacks hands-on experience in the specific problem
-  - Has hands-on experience in the problem but from a different industry
-  - Has strong relevant expertise that could still be useful
+  - Has hands-on experience in the problem area but from a different industry
+  - Has strong relevant expertise that could still be useful to the founder
 
-SCORING (apply to all mentors):
+SCORING (apply to all mentors regardless of tier):
 - Industry Match: 3 points
 - Hands-On Experience: 3 points
 - Relevant Expertise: 2 points
@@ -541,13 +572,12 @@ STRICT RULES:
 - Industry match alone is NOT enough for Tier 1
 - Hands-on alone is NOT enough for Tier 1
 - BOTH must be present for Tier 1
-- Hands On Experience: Yes = personally done it,
+- Be honest about Hands On Experience: Yes = personally done it, 
   Partial = advised/consulted on it, No = no relevant experience
-- If PDF Profile Summary is available, use it to validate industry and hands-on claims
 
-Return strictly as a JSON array.
-Include ALL evaluated mentors — Tier 1 first (1-5), then Tier 2 (up to 5).
-Total between 2 and 10 objects.
+Return strictly as a JSON array. Include ALL mentors evaluated — 
+Tier 1 first (1-5 mentors), then Tier 2 (up to 5 mentors).
+Total array can have between 2 and 10 objects.
 
 Format:
 [
@@ -555,17 +585,17 @@ Format:
     "Tier": "1",
     "Name": "mentor name exactly as given",
     "Overall Score": "score out of 10 as number only e.g. 8",
-    "Industry Match Score": "score | explanation e.g. 3 | Worked in manufacturing exports for 10 years",
-    "Hands On Score": "score | explanation e.g. 3 | Personally handled DGFT and LC documentation",
-    "Expertise Score": "score | explanation e.g. 2 | Strong supply chain expertise",
-    "Credibility Score": "score | explanation e.g. 1 | MBA from regional institute",
-    "Match Reason": "2-3 lines — lead with WHY they qualify for this tier",
+    "Industry Match Score": "score | one line explanation e.g. 3 | Worked in manufacturing exports for 10 years",
+    "Hands On Score": "score | one line explanation e.g. 3 | Personally handled DGFT and LC documentation",
+    "Expertise Score": "score | one line explanation e.g. 2 | Strong supply chain expertise",
+    "Credibility Score": "score | one line explanation e.g. 1 | MBA from regional institute",
+    "Match Reason": "2-3 lines — lead with WHY they qualify for this tier based on industry + hands-on",
     "Relevant Experience": "specific experience directly relevant to the founder's problem",
     "Current Designation": "their current designation",
     "Current Organization": "their current organization",
     "Qualification": "their qualification",
     "Hands On Experience": "Yes / No / Partial",
-    "Hands On Details": "1-2 lines on what they personally did. If No/Partial, state what is missing."
+    "Hands On Details": "1-2 lines on what they have personally done. If No/Partial, state clearly what is missing."
   }}
 ]
 
@@ -580,20 +610,14 @@ Return only the JSON array. No extra text, no markdown outside the array.
                         ai_recommendations = json.loads(cleaned)
                     except json.JSONDecodeError:
                         match_json = re.search(r'\[.*\]', cleaned, re.DOTALL)
-                        ai_recommendations = (
-                            json.loads(match_json.group()) if match_json else []
-                        )
+                        ai_recommendations = json.loads(match_json.group()) if match_json else []
 
                     if ai_recommendations:
                         st.session_state.last_recommendations = ai_recommendations
                         st.session_state.last_query = user_input
 
-                        tier1_count = len(
-                            [m for m in ai_recommendations if m.get("Tier") == "1"]
-                        )
-                        tier2_count = len(
-                            [m for m in ai_recommendations if m.get("Tier") == "2"]
-                        )
+                        tier1_count = len([m for m in ai_recommendations if m.get("Tier") == "1"])
+                        tier2_count = len([m for m in ai_recommendations if m.get("Tier") == "2"])
 
                         summary = (
                             f"Found **{tier1_count} Tier 1 mentor(s)** "
@@ -614,10 +638,7 @@ Return only the JSON array. No extra text, no markdown outside the array.
                             "content": summary
                         })
                     else:
-                        fallback = (
-                            "I could not find strong matches. "
-                            "Could you describe your business problem in more detail?"
-                        )
+                        fallback = "I could not find strong matches. Could you describe your business problem in more detail?"
                         st.markdown(fallback)
                         st.session_state.messages.append({
                             "role": "assistant",
@@ -635,10 +656,7 @@ Return only the JSON array. No extra text, no markdown outside the array.
 
                 founder_context_section = ""
                 if founder_doc_text:
-                    founder_context_section = (
-                        f"Founder uploaded a business document:\n"
-                        f"{founder_doc_text[:1500]}"
-                    )
+                    founder_context_section = f"Founder uploaded a business document:\n{founder_doc_text[:1500]}"
 
                 scoring_prompt = f"""
 A founder is looking for a mentor with this requirement:
@@ -647,7 +665,7 @@ A founder is looking for a mentor with this requirement:
 {founder_context_section}
 
 TIER RULES:
-- Tier 1: Mentor matches BOTH industry AND hands-on experience in founder's problem
+- Tier 1: Mentor matches BOTH industry AND has hands-on experience in founder's problem
 - Tier 2: Mentor matches only one — either industry OR hands-on experience
 
 SCORING:
@@ -665,19 +683,19 @@ Evaluate this uploaded mentor profile:
 Return strictly as a JSON object:
 {{
   "Uploaded Mentor Name": "name if found, else 'Uploaded Mentor'",
-  "Tier": "1 or 2",
-  "Tier Reason": "one line explaining why Tier 1 or Tier 2",
+  "Tier": "1 or 2 based on tier rules above",
+  "Tier Reason": "one line explaining why this mentor is Tier 1 or Tier 2",
   "Overall Score": "score out of 10 as number only",
-  "Industry Match Score": "score | explanation",
-  "Hands On Score": "score | explanation",
-  "Expertise Score": "score | explanation",
-  "Credibility Score": "score | explanation",
+  "Industry Match Score": "score | one line explanation",
+  "Hands On Score": "score | one line explanation",
+  "Expertise Score": "score | one line explanation",
+  "Credibility Score": "score | one line explanation",
   "Hands On Experience": "Yes / No / Partial",
-  "Hands On Details": "1-2 lines on what they personally did",
-  "Match Summary": "2-3 lines leading with industry and hands-on",
+  "Hands On Details": "1-2 lines on what they have personally done",
+  "Match Summary": "2-3 lines — lead with industry match and hands-on experience",
   "Key Strengths": "top 3 strengths relevant to founder's problem",
   "Gaps": "any gaps compared to what the founder needs",
-  "Rank vs Tier 1": "how this mentor compares to Tier 1 mentors",
+  "Rank vs Tier 1": "how this mentor compares to Tier 1 mentors if any",
   "Rank vs Tier 2": "how this mentor compares to Tier 2 mentors"
 }}
 
@@ -691,20 +709,13 @@ Return only the JSON object. No extra text.
                         score_result = json.loads(score_cleaned)
                     except json.JSONDecodeError:
                         match_score = re.search(r'\{.*\}', score_cleaned, re.DOTALL)
-                        score_result = (
-                            json.loads(match_score.group()) if match_score else {}
-                        )
+                        score_result = json.loads(match_score.group()) if match_score else {}
 
                     if score_result:
-                        mentor_name = score_result.get(
-                            "Uploaded Mentor Name", "Uploaded Mentor"
-                        )
+                        mentor_name = score_result.get("Uploaded Mentor Name", "Uploaded Mentor")
                         score_val = score_result.get("Overall Score", "N/A")
-                        hands_on_val = score_result.get(
-                            "Hands On Experience", ""
-                        ).strip()
+                        hands_on_val = score_result.get("Hands On Experience", "").strip()
                         tier_val = score_result.get("Tier", "2")
-                        tier_reason = score_result.get("Tier Reason", "")
 
                         tier_color = "🏆" if tier_val == "1" else "🔍"
                         st.markdown(
@@ -712,6 +723,7 @@ Return only the JSON object. No extra text.
                             f"{mentor_name} | Tier {tier_val}"
                         )
 
+                        tier_reason = score_result.get("Tier Reason", "")
                         if tier_val == "1":
                             st.success(f"✅ Tier 1 — {tier_reason}")
                         else:
@@ -731,11 +743,7 @@ Return only the JSON object. No extra text.
                         ]:
                             with col:
                                 raw = score_result.get(key, "N/A")
-                                parts = (
-                                    raw.split("|")
-                                    if isinstance(raw, str) and "|" in raw
-                                    else [raw, ""]
-                                )
+                                parts = raw.split("|") if isinstance(raw, str) and "|" in raw else [raw, ""]
                                 st.metric(label, f"{parts[0].strip()} / {max_val}")
                                 if len(parts) > 1:
                                     st.caption(parts[1].strip())
@@ -744,18 +752,11 @@ Return only the JSON object. No extra text.
 
                         st.markdown("**🛠️ Hands-On Experience**")
                         if hands_on_val == "Yes":
-                            st.success(
-                                f"🟢 Yes — {score_result.get('Hands On Details', '')}"
-                            )
+                            st.success(f"🟢 Yes — {score_result.get('Hands On Details', '')}")
                         elif hands_on_val == "Partial":
-                            st.warning(
-                                f"🟡 Partial — "
-                                f"{score_result.get('Hands On Details', '')}"
-                            )
+                            st.warning(f"🟡 Partial — {score_result.get('Hands On Details', '')}")
                         else:
-                            st.error(
-                                f"🔴 No — {score_result.get('Hands On Details', '')}"
-                            )
+                            st.error(f"🔴 No — {score_result.get('Hands On Details', '')}")
 
                         col1, col2 = st.columns(2)
                         with col1:
@@ -777,9 +778,8 @@ Return only the JSON object. No extra text.
                         st.write(score_result.get("Match Summary", "N/A"))
 
                         score_content = (
-                            f"Uploaded mentor **{mentor_name}** is "
-                            f"**Tier {tier_val}** with score **{score_val}/10**. "
-                            f"{tier_reason}"
+                            f"Uploaded mentor **{mentor_name}** is **Tier {tier_val}** "
+                            f"with score **{score_val}/10**. {tier_reason}"
                         )
                         st.session_state.messages.append({
                             "role": "assistant",
@@ -792,7 +792,4 @@ Return only the JSON object. No extra text.
 
     elif mentor_profile_text and not st.session_state.last_recommendations:
         with st.chat_message("assistant"):
-            st.info(
-                "💡 Mentor profile uploaded. "
-                "Run a search first to get match analysis."
-            )
+            st.info("💡 Mentor profile uploaded. Run a search first to get match analysis.")
