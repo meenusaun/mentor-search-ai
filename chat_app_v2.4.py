@@ -234,9 +234,9 @@ def detect_intent(user_input, last_recommendations):
 def display_expert_card(expert, index, tier_label, df):
     hands_on = expert.get("Hands On Experience", "").strip()
     if hands_on == "Yes":
-        badge = "🟢 Hands-On Operator"
+        badge = "🟢 Hands-On/Operator"
     elif hands_on == "Partial":
-        badge = "🟡 Partial Hands-on/Operator"
+        badge = "🟡 Partial Hands-on/Operator Experience"
     else:
         badge = "🔴 No Direct Experience"
 
@@ -252,7 +252,7 @@ def display_expert_card(expert, index, tier_label, df):
 
         for col, key, label, max_val in [
             (sc1, "Industry Match Score", "🏭 Industry Match", "3"),
-            (sc2, "Hands On Score", "🛠️ Operator Experience", "3"),
+            (sc2, "Hands On Score", "🛠️ Hands-on/Operator Experience", "3"),
             (sc3, "Expertise Score", "💼 Expertise", "2"),
             (sc4, "Credibility Score", "🏅 Key Credentials", "2"),
         ]:
