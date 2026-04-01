@@ -236,7 +236,7 @@ def display_expert_card(expert, index, tier_label, df):
     if hands_on == "Yes":
         badge = "🟢 Hands-On Operator"
     elif hands_on == "Partial":
-        badge = "🟡 Partial Operator"
+        badge = "🟡 Partial Hands-on/Operator"
     else:
         badge = "🔴 No Direct Experience"
 
