@@ -346,13 +346,15 @@ def call_ai(prompt, max_tokens=2048):
     if ai_model == "GPT-4o Mini (OpenAI)":
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0  # ✅ deterministic output
         )
         return response.choices[0].message.content
     else:
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=max_tokens,
+            temperature=0,  # ✅ deterministic output
             messages=[{"role": "user", "content": prompt}]
         )
         return response.content[0].text
