@@ -278,13 +278,13 @@ def display_expert_card(expert, index, tier_label, df):
         st.markdown("**💼 Relevant Experience**")
         st.write(expert.get("Relevant Experience", ""))
 
-        st.markdown("**🛠️ Operator Experience in Founder's Area**")
+        st.markdown("**🛠️ Hands-on/Operator Experience in Founder's Area**")
         if hands_on == "Yes":
-            st.success(f"✅ Yes — Operator — {expert.get('Hands On Details', '')}")
+            st.success(f"✅ Yes — Hands-on/Operator — {expert.get('Hands On Details', '')}")
         elif hands_on == "Partial":
-            st.warning(f"⚠️ Partial Operator — {expert.get('Hands On Details', '')}")
+            st.warning(f"⚠️ Partial Hands-on/Operator — {expert.get('Hands On Details', '')}")
         else:
-            st.error(f"❌ No Operator Experience — {expert.get('Hands On Details', '')}")
+            st.error(f"❌ No Hands-on/Operator Experience — {expert.get('Hands On Details', '')}")
 
         linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
         linkedin = linkedin_map.get(expert.get("Name", ""), "")
@@ -700,7 +700,7 @@ Return only the JSON object. No extra text.
 
                         for col, key, label, max_val in [
                             (sc2, "Industry Match Score", "🏭 Industry", "3"),
-                            (sc3, "Hands On Score", "🛠️ Operator Exp", "3"),
+                            (sc3, "Hands On Score", "🛠️ Hands-on/Operator Exp", "3"),
                             (sc4, "Expertise Score", "💼 Expertise", "2"),
                             (sc5, "Credibility Score", "🏅 Key Credentials", "2"),
                         ]:
@@ -717,19 +717,19 @@ Return only the JSON object. No extra text.
 
                         st.markdown("---")
 
-                        st.markdown("**🛠️ Operator Experience**")
+                        st.markdown("**🛠️ Hands-on/Operator Experience**")
                         if hands_on_val == "Yes":
                             st.success(
-                                f"🟢 Yes — Operator — {score_result.get('Hands On Details', '')}"
+                                f"🟢 Yes — Hands-on/Operator — {score_result.get('Hands On Details', '')}"
                             )
                         elif hands_on_val == "Partial":
                             st.warning(
-                                f"🟡 Partial Operator — "
+                                f"🟡 Partial Hands-on/Operator — "
                                 f"{score_result.get('Hands On Details', '')}"
                             )
                         else:
                             st.error(
-                                f"🔴 No Operator Experience — {score_result.get('Hands On Details', '')}"
+                                f"🔴 No Hands-on/Operator Experience — {score_result.get('Hands On Details', '')}"
                             )
 
                         col1, col2 = st.columns(2)
