@@ -18,7 +18,7 @@ anthropic_client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
 # ------------------ PAGE CONFIG ------------------
 st.set_page_config(
-    page_title="Resources Network - Look for Mentor",
+    page_title="Resources Network - Look for Expert",
     page_icon="🔍",
     layout="wide"
 )
@@ -29,7 +29,7 @@ with col1:
 st.write("")
 with col2:
     st.markdown(
-        "<h2 style='text-align: center;'>🌐 Resources Network - Look for Mentor</h2>",
+        "<h2 style='text-align: center;'>🌐 Resources Network - Look for Expert</h2>",
         unsafe_allow_html=True
     )
 
@@ -49,7 +49,7 @@ else:
 # ------------------ FILE UPLOADERS ------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 Upload Business Document")
-st.sidebar.caption("Upload your pitch deck or business plan to improve mentor matching.")
+st.sidebar.caption("Upload your pitch deck or business plan to improve expert matching.")
 founder_uploaded_file = st.sidebar.file_uploader(
     "Pitch Deck / Business Document",
     type=["pdf", "docx", "txt"],
@@ -57,12 +57,12 @@ founder_uploaded_file = st.sidebar.file_uploader(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("👤 Check a Mentor's Profile")
-st.sidebar.caption("Upload a mentor's resume to score them against your requirement.")
-mentor_uploaded_file = st.sidebar.file_uploader(
-    "Mentor Resume / Profile",
+st.sidebar.subheader("👤 Check an Expert's Profile")
+st.sidebar.caption("Upload an expert's resume to score them against your requirement.")
+expert_uploaded_file = st.sidebar.file_uploader(
+    "Expert Resume / Profile",
     type=["pdf", "docx", "txt"],
-    key="mentor_profile"
+    key="expert_profile"
 )
 
 # ------------------ CLEAR CHAT BUTTON ------------------
@@ -133,7 +133,6 @@ def extract_text_from_file_path(file_path):
 # ------------------ LOAD DATA ------------------
 @st.cache_data
 def load_data():
-    # ✅ FIX 1 — faster Excel loading with dtype=str and na_filter=False
     df = pd.read_excel(
         "mentors.xlsx",
         engine="openpyxl",
@@ -141,8 +140,6 @@ def load_data():
         na_filter=False
     )
 
-    # ✅ FIX 2 — no need for fillna/astype since dtype=str handles it
-    # Just ensure required columns exist
     required_cols = [
         "Expertise", "Secondary Expertise", "Industry", "Secondary Industry",
         "Description", "Expertise Tags", "Industry Tags",
@@ -153,7 +150,6 @@ def load_data():
         if col not in df.columns:
             df[col] = ""
 
-    # ✅ FIX 3 — skip PDF loading on Streamlit Cloud entirely
     is_cloud = os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit" or \
                os.environ.get("IS_STREAMLIT_CLOUD") is not None or \
                not os.path.exists(os.path.expanduser("~/.streamlit/config.toml"))
@@ -163,7 +159,6 @@ def load_data():
     else:
         df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
 
-    # ✅ FIX 4 — vectorized combined field, no apply()
     df["combined"] = (
         "Expertise: " + df["Expertise"] + ". " +
         "Secondary Expertise: " + df["Secondary Expertise"] + ". " +
@@ -180,7 +175,6 @@ def load_data():
 df = load_data()
 
 # ------------------ LOAD MODEL ------------------
-# ✅ FIX 5 — model is cached with cache_resource so loads only once
 @st.cache_resource
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
@@ -188,7 +182,6 @@ def load_model():
 model = load_model()
 
 # ------------------ CREATE VECTORS ------------------
-# ✅ FIX 6 — batch encoding + tolist() for proper cache hashing
 @st.cache_data
 def get_vectors(texts):
     return model.encode(texts, batch_size=64, show_progress_bar=False)
@@ -204,13 +197,13 @@ if founder_uploaded_file:
     else:
         st.sidebar.warning("⚠️ Could not extract text from business document.")
 
-mentor_profile_text = ""
-if mentor_uploaded_file:
-    mentor_profile_text = extract_text_from_uploaded_file(mentor_uploaded_file)
-    if mentor_profile_text:
-        st.sidebar.success("✅ Mentor profile parsed!")
+expert_profile_text = ""
+if expert_uploaded_file:
+    expert_profile_text = extract_text_from_uploaded_file(expert_uploaded_file)
+    if expert_profile_text:
+        st.sidebar.success("✅ Expert profile parsed!")
     else:
-        st.sidebar.warning("⚠️ Could not extract text from mentor profile.")
+        st.sidebar.warning("⚠️ Could not extract text from expert profile.")
 
 # ------------------ SESSION STATE INIT ------------------
 if "messages" not in st.session_state:
@@ -227,8 +220,8 @@ def detect_intent(user_input, last_recommendations):
         "which is better", "difference between", "what about",
         "explain", "elaborate", "details about", "why is", "how is",
         "refine", "show more", "different", "another", "instead",
-        "same industry", "similar", "like #", "mentor #", "first mentor",
-        "second mentor", "third mentor", "top mentor", "number"
+        "same industry", "similar", "like #", "expert #", "first expert",
+        "second expert", "third expert", "top expert", "number"
     ]
     input_lower = user_input.lower()
     has_recommendations = len(last_recommendations) > 0
@@ -237,22 +230,20 @@ def detect_intent(user_input, last_recommendations):
     )
     return "followup" if is_followup else "new_search"
 
-# ------------------ DISPLAY SINGLE MENTOR CARD ------------------
-def display_mentor_card(mentor, index, tier_label, df):
-    hands_on = mentor.get("Hands On Experience", "").strip()
+# ------------------ DISPLAY SINGLE EXPERT CARD ------------------
+def display_expert_card(expert, index, tier_label, df):
+    hands_on = expert.get("Hands On Experience", "").strip()
     if hands_on == "Yes":
-        badge = "🟢 Hands-On/Operator"
+        badge = "🟢 Hands-On Operator"
     elif hands_on == "Partial":
-        badge = "🟡 Partial"
+        badge = "🟡 Partial Operator"
     else:
         badge = "🔴 No Direct Experience"
 
-    overall = mentor.get("Overall Score", "N/A")
+    overall = expert.get("Overall Score", "N/A")
 
     with st.expander(
-        f"#{index} — {mentor.get('Name', 'N/A')} | "
-        # f"{mentor.get('Current Designation', '')} at "
-        # f"{mentor.get('Current Organization', '')} | "
+        f"#{index} — {expert.get('Name', 'N/A')} | "
         f"⭐ {overall}/10 | {badge}",
         expanded=(index == 1)
     ):
@@ -261,12 +252,12 @@ def display_mentor_card(mentor, index, tier_label, df):
 
         for col, key, label, max_val in [
             (sc1, "Industry Match Score", "🏭 Industry Match", "3"),
-            (sc2, "Hands On Score", "🛠️ Hands-On/Operator Exp", "3"),
+            (sc2, "Hands On Score", "🛠️ Operator Experience", "3"),
             (sc3, "Expertise Score", "💼 Expertise", "2"),
-            (sc4, "Credibility Score", "🎓 Key Credentials", "2"),
+            (sc4, "Credibility Score", "🏅 Key Credentials", "2"),
         ]:
             with col:
-                raw = mentor.get(key, "N/A")
+                raw = expert.get(key, "N/A")
                 parts = (
                     raw.split("|")
                     if isinstance(raw, str) and "|" in raw
@@ -278,42 +269,30 @@ def display_mentor_card(mentor, index, tier_label, df):
 
         st.markdown("---")
 
-        # col1, col2 = st.columns(2)
-        # with col1:
-        #     st.markdown("**🎓 Qualification**")
-        #     st.write(mentor.get("Qualification", "Not available"))
-        # with col2:
-        #     st.markdown("**🏢 Currently Working At**")
-        #     st.write(
-        #         f"{mentor.get('Current Designation', '')} — "
-        #         f"{mentor.get('Current Organization', '')}"
-        #     )
-
         st.markdown("**🎯 Core Area of Expertise**")
-        st.write(mentor.get("Core Expertise", "Not available"))
-        
+        st.write(expert.get("Core Expertise", "Not available"))
+
         st.markdown("**✅ Why Suitable**")
-        st.write(mentor.get("Match Reason", ""))
+        st.write(expert.get("Match Reason", ""))
 
         st.markdown("**💼 Relevant Experience**")
-        st.write(mentor.get("Relevant Experience", ""))
+        st.write(expert.get("Relevant Experience", ""))
 
-        st.markdown("**🛠️ Hands-On Experience in Founder's Area**")
+        st.markdown("**🛠️ Operator Experience in Founder's Area**")
         if hands_on == "Yes":
-            st.success(f"✅ Yes — {mentor.get('Hands On Details', '')}")
+            st.success(f"✅ Yes — Operator — {expert.get('Hands On Details', '')}")
         elif hands_on == "Partial":
-            st.warning(f"⚠️ Partial — {mentor.get('Hands On Details', '')}")
+            st.warning(f"⚠️ Partial Operator — {expert.get('Hands On Details', '')}")
         else:
-            st.error(f"❌ No Direct Experience — {mentor.get('Hands On Details', '')}")
+            st.error(f"❌ No Operator Experience — {expert.get('Hands On Details', '')}")
 
-        # ✅ FIX 7 — use faster lookup instead of df filter
         linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
-        linkedin = linkedin_map.get(mentor.get("Name", ""), "")
+        linkedin = linkedin_map.get(expert.get("Name", ""), "")
         if linkedin and str(linkedin).strip() != "":
             st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
 
 # ------------------ DISPLAY FULL RESULTS ------------------
-def display_mentor_results(ai_recommendations, df):
+def display_expert_results(ai_recommendations, df):
     if not ai_recommendations:
         return
 
@@ -323,26 +302,26 @@ def display_mentor_results(ai_recommendations, df):
     if tier1:
         st.markdown("""
         ## 🏆 Tier 1 — Strong Matches
-        > These mentors match **both the industry AND have hands-on experience**
+        > These experts match **both the industry AND have hands-on operator experience**
         in the founder's problem area.
         """)
-        for i, mentor in enumerate(tier1):
-            display_mentor_card(mentor, i + 1, "Tier 1", df)
+        for i, expert in enumerate(tier1):
+            display_expert_card(expert, i + 1, "Tier 1", df)
     else:
         st.warning(
-            "⚠️ No Tier 1 matches found — no mentor matched both industry "
-            "AND hands-on experience for this requirement."
+            "⚠️ No Tier 1 matches found — no expert matched both industry "
+            "AND operator experience for this requirement."
         )
 
     if tier2:
         st.markdown("---")
         st.markdown("""
         ## 🔍 Tier 2 — Partial Matches
-        > These mentors match **either the industry OR have relevant experience**
+        > These experts match **either the industry OR have relevant experience**
         but not both. They may still provide useful guidance.
         """)
-        for i, mentor in enumerate(tier2):
-            display_mentor_card(mentor, i + 1, "Tier 2", df)
+        for i, expert in enumerate(tier2):
+            display_expert_card(expert, i + 1, "Tier 2", df)
 
 # ------------------ AI CALL HELPER ------------------
 def call_ai(prompt, max_tokens=2048):
@@ -350,14 +329,14 @@ def call_ai(prompt, max_tokens=2048):
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0  # ✅ deterministic output
+            temperature=0
         )
         return response.choices[0].message.content
     else:
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=max_tokens,
-            temperature=0,  # ✅ deterministic output
+            temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
         return response.content[0].text
@@ -367,8 +346,8 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         if message.get("type") == "recommendations":
             st.markdown(message["summary"])
-            display_mentor_results(message["recommendations"], df)
-        elif message.get("type") == "mentor_score":
+            display_expert_results(message["recommendations"], df)
+        elif message.get("type") == "expert_score":
             st.markdown(message["content"])
         else:
             st.markdown(message["content"])
@@ -399,27 +378,27 @@ if user_input:
                     conversation_history += f"{role}: {content}\n"
 
                 followup_prompt = f"""
-You are an AI mentor-matching assistant helping an Indian founder find the right mentor.
+You are an AI expert-matching assistant helping an Indian founder find the right expert.
 
 Original search query: "{st.session_state.last_query}"
 
 Previous conversation:
 {conversation_history}
 
-Current recommended mentors (Tier 1 = Industry + Hands-On match, Tier 2 = Partial match):
+Current recommended experts (Tier 1 = Industry + Operator experience match, Tier 2 = Partial match):
 {json.dumps(st.session_state.last_recommendations, indent=2)}
 
 Founder's follow-up question: "{user_input}"
 
 Instructions:
 - Answer the follow-up question conversationally and helpfully
-- Always mention which Tier a mentor belongs to when referencing them
-- If asked to compare mentors, compare them clearly with pros and cons
-- If asked to refine search, explain what kind of mentor would be better
-- If asked about a specific mentor, give detailed insights
-- If asked for a different mentor type, suggest what to look for
-- Always lead with Industry Match and Hands-On Experience when comparing
-- Reference mentor names, designations, qualifications and scores where relevant
+- Always mention which Tier an expert belongs to when referencing them
+- If asked to compare experts, compare them clearly with pros and cons
+- If asked to refine search, explain what kind of expert would be better
+- If asked about a specific expert, give detailed insights
+- If asked for a different expert type, suggest what to look for
+- Always lead with Industry Match and Operator Experience when comparing
+- Reference expert names, designations, qualifications and scores where relevant
 - Keep response clear, structured and founder-friendly
 - Do NOT return JSON — return a natural conversational response
 """
@@ -437,7 +416,7 @@ Instructions:
     # -------- NEW SEARCH HANDLING --------
     else:
         with st.chat_message("assistant"):
-            with st.spinner("Searching for the best mentors..."):
+            with st.spinner("Searching for the best experts..."):
 
                 enriched_query = user_input
                 if founder_doc_text:
@@ -446,24 +425,22 @@ Instructions:
                         f"Context from business document:\n{founder_doc_text[:1500]}"
                     )
 
-                # ✅ FIX 8 — convert to numpy for faster cosine similarity
                 query_vec = model.encode([enriched_query])
                 similarity = cosine_similarity(query_vec, vectors)
                 df["score"] = similarity[0]
-                # ✅ Sort by score AND name for consistent ordering
                 candidates = df.sort_values(
                     by=["score", "Name"],
                     ascending=[False, True]
                 ).head(20)
 
-                mentor_info = ""
+                expert_info = ""
                 for _, row in candidates.iterrows():
                     doc_summary = (
                         row["Doc Text"][:500]
                         if row["Doc Text"] and len(row["Doc Text"]) > 50
                         else "Not available"
                     )
-                    mentor_info += f"""
+                    expert_info += f"""
 Name: {row['Name']}
 Expertise: {row['Expertise']}
 Secondary Expertise: {row['Secondary Expertise']}
@@ -491,7 +468,7 @@ This is a new search. Treat it independently but keep previous context in mind.
 """
 
                 prompt = f"""
-You are helping an Indian founder find the right mentor.
+You are helping an Indian founder find the right expert.
 
 Founder's business brief and problem statement:
 "{user_input}"
@@ -499,66 +476,71 @@ Founder's business brief and problem statement:
 {founder_context_section}
 {previous_context}
 
-Here are mentor profiles to evaluate:
-{mentor_info}
+Here are expert profiles to evaluate:
+{expert_info}
 
 TIER CLASSIFICATION RULES — This is the most important part:
 
 TIER 1 — Strong Match (show minimum 1, maximum 5):
-A mentor qualifies for Tier 1 ONLY if BOTH conditions are true:
-  ✅ Condition 1 — Industry Match: The mentor has directly worked IN the same 
-     or very closely related industry as the founder's business. Not just advised 
+An expert qualifies for Tier 1 ONLY if BOTH conditions are true:
+  ✅ Condition 1 — Industry Match: The expert has directly worked IN the same
+     or very closely related industry as the founder's business. Not just advised
      — actually worked in it as an operator, founder, or senior leader.
-  ✅ Condition 2 — Hands-On Experience: The mentor has PERSONALLY done the 
-     specific task or solved the specific problem the founder is facing. 
-     Not consulting, not teaching, not advising — actually done it themselves.
+  ✅ Condition 2 — Operator Experience: The expert has PERSONALLY done the
+     specific task or solved the specific problem the founder is facing.
+     Not consulting, not teaching, not advising — actually done it themselves
+     on the ground as an operator.
 
-If even ONE condition is missing → mentor goes to Tier 2, NOT Tier 1.
-Be strict. It is better to show 1 Tier 1 mentor than to incorrectly 
+If even ONE condition is missing → expert goes to Tier 2, NOT Tier 1.
+Be strict. It is better to show 1 Tier 1 expert than to incorrectly
 promote a weak match to Tier 1.
 
 TIER 2 — Partial Match (maximum 5):
-Mentors who meet at least ONE of the following:
-  - Matches the industry but lacks hands-on experience in the specific problem
-  - Has hands-on experience in the problem area but from a different industry
+Experts who meet at least ONE of the following:
+  - Matches the industry but lacks operator experience in the specific problem
+  - Has operator experience in the problem area but from a different industry
   - Has strong relevant expertise that could still be useful to the founder
 
-SCORING (apply to all mentors regardless of tier):
+SCORING (apply to all experts regardless of tier):
 - Industry Match: 3 points
-- Hands-On Experience: 3 points
+- Operator Experience: 3 points
 - Relevant Expertise: 2 points
-- Qualification + Credibility: 2 points
+- Key Credentials: 2 points
 
 STRICT RULES:
-- Never put a mentor in Tier 1 just because they are impressive or well-qualified
+- Never put an expert in Tier 1 just because they are impressive or well-qualified
 - Industry match alone is NOT enough for Tier 1
-- Hands-on alone is NOT enough for Tier 1
+- Operator experience alone is NOT enough for Tier 1
 - BOTH must be present for Tier 1
-- Be honest about Hands On Experience: Yes = personally done it, 
+- Be honest about Operator Experience: Yes = personally done it,
   Partial = advised/consulted on it, No = no relevant experience
+- Be CONSISTENT — if an expert's profile does not clearly state they worked
+  in this industry, do NOT assume it
+- If you are not sure whether an expert qualifies for Tier 1, put them in Tier 2
+- When in doubt → Tier 2, not Tier 1
 
-Return strictly as a JSON array. Include ALL mentors evaluated — 
-Tier 1 first (1-5 mentors), then Tier 2 (up to 5 mentors).
+Return strictly as a JSON array. Include ALL experts evaluated —
+Tier 1 first (1-5 experts), then Tier 2 (up to 5 experts).
 Total array can have between 2 and 10 objects.
 
 Format:
 [
   {{
     "Tier": "1",
-    "Name": "mentor name exactly as given",
+    "Name": "expert name exactly as given",
     "Overall Score": "score out of 10 as number only e.g. 8",
     "Industry Match Score": "score | one line explanation e.g. 3 | Worked in manufacturing exports for 10 years",
     "Hands On Score": "score | one line explanation e.g. 3 | Personally handled DGFT and LC documentation",
     "Expertise Score": "score | one line explanation e.g. 2 | Strong supply chain expertise",
     "Credibility Score": "score | one line explanation — focus on industry recognition, awards, board memberships, publications or speaking engagements e.g. 2 | Featured speaker at CII, board member at 2 startups",
-    "Core Expertise": "1 line — the single most relevant core area of expertise this mentor is known for",
-    "Match Reason": "2-3 lines — lead with WHY they qualify for this tier based on industry + hands-on",
+    "Core Expertise": "1 line — the single most relevant core area of expertise this expert is known for",
+    "Match Reason": "2-3 lines — lead with WHY they qualify for this tier based on industry + operator experience",
     "Relevant Experience": "specific experience directly relevant to the founder's problem",
     "Current Designation": "their current designation",
     "Current Organization": "their current organization",
     "Qualification": "their qualification",
     "Hands On Experience": "Yes / No / Partial",
-    "Hands On Details": "1-2 lines on what they have personally done. If No/Partial, state clearly what is missing."
+    "Hands On Details": "1-2 lines on what they have personally done as an operator. If No/Partial, state clearly what is missing."
   }}
 ]
 
@@ -589,15 +571,15 @@ Return only the JSON array. No extra text, no markdown outside the array.
                         )
 
                         summary = (
-                            f"Found **{tier1_count} Tier 1 mentor(s)** "
-                            f"(Industry + Hands-On match) and "
-                            f"**{tier2_count} Tier 2 mentor(s)** (partial match).\n\n"
-                            f"You can ask me to **compare any two mentors**, "
-                            f"**tell me more about a specific mentor**, "
+                            f"Found **{tier1_count} Tier 1 expert(s)** "
+                            f"(Industry + Operator experience match) and "
+                            f"**{tier2_count} Tier 2 expert(s)** (partial match).\n\n"
+                            f"You can ask me to **compare any two experts**, "
+                            f"**tell me more about a specific expert**, "
                             f"**refine the search**, or **start a new search** anytime."
                         )
                         st.markdown(summary)
-                        display_mentor_results(ai_recommendations, df)
+                        display_expert_results(ai_recommendations, df)
 
                         st.session_state.messages.append({
                             "role": "assistant",
@@ -621,10 +603,10 @@ Return only the JSON array. No extra text, no markdown outside the array.
                 except Exception as e:
                     st.error(f"AI Error: {e}")
 
-    # -------- UPLOADED MENTOR PROFILE SCORING --------
-    if mentor_profile_text and st.session_state.last_recommendations:
+    # -------- UPLOADED EXPERT PROFILE SCORING --------
+    if expert_profile_text and st.session_state.last_recommendations:
         with st.chat_message("assistant"):
-            with st.spinner("Scoring uploaded mentor profile..."):
+            with st.spinner("Scoring uploaded expert profile..."):
 
                 founder_context_section = ""
                 if founder_doc_text:
@@ -634,44 +616,44 @@ Return only the JSON array. No extra text, no markdown outside the array.
                     )
 
                 scoring_prompt = f"""
-A founder is looking for a mentor with this requirement:
+A founder is looking for an expert with this requirement:
 "{st.session_state.last_query}"
 
 {founder_context_section}
 
 TIER RULES:
-- Tier 1: Mentor matches BOTH industry AND has hands-on experience in founder's problem
-- Tier 2: Mentor matches only one — either industry OR hands-on experience
+- Tier 1: Expert matches BOTH industry AND has operator experience in founder's problem
+- Tier 2: Expert matches only one — either industry OR operator experience
 
 SCORING:
 - Industry Match: 3 points
-- Hands-On Experience: 3 points
+- Operator Experience: 3 points
 - Relevant Expertise: 2 points
-- Qualification + Credibility: 2 points
+- Key Credentials: 2 points
 
-Current AI recommended mentors for comparison:
+Current AI recommended experts for comparison:
 {json.dumps(st.session_state.last_recommendations, indent=2)}
 
-Evaluate this uploaded mentor profile:
-{mentor_profile_text[:2000]}
+Evaluate this uploaded expert profile:
+{expert_profile_text[:2000]}
 
 Return strictly as a JSON object:
 {{
-  "Uploaded Mentor Name": "name if found, else 'Uploaded Mentor'",
+  "Uploaded Expert Name": "name if found, else 'Uploaded Expert'",
   "Tier": "1 or 2 based on tier rules above",
-  "Tier Reason": "one line explaining why this mentor is Tier 1 or Tier 2",
+  "Tier Reason": "one line explaining why this expert is Tier 1 or Tier 2",
   "Overall Score": "score out of 10 as number only",
   "Industry Match Score": "score | one line explanation",
   "Hands On Score": "score | one line explanation",
   "Expertise Score": "score | one line explanation",
-  "Credibility Score": "score | one line explanation",
+  "Credibility Score": "score | one line explanation — focus on industry recognition, awards, board memberships",
   "Hands On Experience": "Yes / No / Partial",
-  "Hands On Details": "1-2 lines on what they have personally done",
-  "Match Summary": "2-3 lines — lead with industry match and hands-on experience",
+  "Hands On Details": "1-2 lines on what they have personally done as an operator",
+  "Match Summary": "2-3 lines — lead with industry match and operator experience",
   "Key Strengths": "top 3 strengths relevant to founder's problem",
   "Gaps": "any gaps compared to what the founder needs",
-  "Rank vs Tier 1": "how this mentor compares to Tier 1 mentors if any",
-  "Rank vs Tier 2": "how this mentor compares to Tier 2 mentors"
+  "Rank vs Tier 1": "how this expert compares to Tier 1 experts if any",
+  "Rank vs Tier 2": "how this expert compares to Tier 2 experts"
 }}
 
 Return only the JSON object. No extra text.
@@ -689,8 +671,8 @@ Return only the JSON object. No extra text.
                         )
 
                     if score_result:
-                        mentor_name = score_result.get(
-                            "Uploaded Mentor Name", "Uploaded Mentor"
+                        expert_name = score_result.get(
+                            "Uploaded Expert Name", "Uploaded Expert"
                         )
                         score_val = score_result.get("Overall Score", "N/A")
                         hands_on_val = score_result.get(
@@ -701,8 +683,8 @@ Return only the JSON object. No extra text.
 
                         tier_color = "🏆" if tier_val == "1" else "🔍"
                         st.markdown(
-                            f"---\n#### {tier_color} Uploaded Mentor — "
-                            f"{mentor_name} | Tier {tier_val}"
+                            f"---\n#### {tier_color} Uploaded Expert — "
+                            f"{expert_name} | Tier {tier_val}"
                         )
 
                         if tier_val == "1":
@@ -718,9 +700,9 @@ Return only the JSON object. No extra text.
 
                         for col, key, label, max_val in [
                             (sc2, "Industry Match Score", "🏭 Industry", "3"),
-                            (sc3, "Hands On Score", "🛠️ Hands-On", "3"),
+                            (sc3, "Hands On Score", "🛠️ Operator Exp", "3"),
                             (sc4, "Expertise Score", "💼 Expertise", "2"),
-                            (sc5, "Credibility Score", "🎓 Key Credentials", "2"),
+                            (sc5, "Credibility Score", "🏅 Key Credentials", "2"),
                         ]:
                             with col:
                                 raw = score_result.get(key, "N/A")
@@ -735,19 +717,19 @@ Return only the JSON object. No extra text.
 
                         st.markdown("---")
 
-                        st.markdown("**🛠️ Hands-On Experience**")
+                        st.markdown("**🛠️ Operator Experience**")
                         if hands_on_val == "Yes":
                             st.success(
-                                f"🟢 Yes — {score_result.get('Hands On Details', '')}"
+                                f"🟢 Yes — Operator — {score_result.get('Hands On Details', '')}"
                             )
                         elif hands_on_val == "Partial":
                             st.warning(
-                                f"🟡 Partial — "
+                                f"🟡 Partial Operator — "
                                 f"{score_result.get('Hands On Details', '')}"
                             )
                         else:
                             st.error(
-                                f"🔴 No — {score_result.get('Hands On Details', '')}"
+                                f"🔴 No Operator Experience — {score_result.get('Hands On Details', '')}"
                             )
 
                         col1, col2 = st.columns(2)
@@ -770,22 +752,22 @@ Return only the JSON object. No extra text.
                         st.write(score_result.get("Match Summary", "N/A"))
 
                         score_content = (
-                            f"Uploaded mentor **{mentor_name}** is "
+                            f"Uploaded expert **{expert_name}** is "
                             f"**Tier {tier_val}** with score **{score_val}/10**. "
                             f"{tier_reason}"
                         )
                         st.session_state.messages.append({
                             "role": "assistant",
-                            "type": "mentor_score",
+                            "type": "expert_score",
                             "content": score_content
                         })
 
                 except Exception as e:
-                    st.error(f"Mentor Scoring Error: {e}")
+                    st.error(f"Expert Scoring Error: {e}")
 
-    elif mentor_profile_text and not st.session_state.last_recommendations:
+    elif expert_profile_text and not st.session_state.last_recommendations:
         with st.chat_message("assistant"):
             st.info(
-                "💡 Mentor profile uploaded. "
+                "💡 Expert profile uploaded. "
                 "Run a search first to get match analysis."
             )
