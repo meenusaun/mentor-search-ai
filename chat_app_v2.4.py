@@ -251,8 +251,8 @@ def display_mentor_card(mentor, index, tier_label, df):
 
     with st.expander(
         f"#{index} — {mentor.get('Name', 'N/A')} | "
-        f"{mentor.get('Current Designation', '')} at "
-        f"{mentor.get('Current Organization', '')} | "
+        # f"{mentor.get('Current Designation', '')} at "
+        # f"{mentor.get('Current Organization', '')} | "
         f"⭐ {overall}/10 | {badge}",
         expanded=(index == 1)
     ):
@@ -278,16 +278,16 @@ def display_mentor_card(mentor, index, tier_label, df):
 
         st.markdown("---")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**🎓 Qualification**")
-            st.write(mentor.get("Qualification", "Not available"))
-        with col2:
-            st.markdown("**🏢 Currently Working At**")
-            st.write(
-                f"{mentor.get('Current Designation', '')} — "
-                f"{mentor.get('Current Organization', '')}"
-            )
+        # col1, col2 = st.columns(2)
+        # with col1:
+        #     st.markdown("**🎓 Qualification**")
+        #     st.write(mentor.get("Qualification", "Not available"))
+        # with col2:
+        #     st.markdown("**🏢 Currently Working At**")
+        #     st.write(
+        #         f"{mentor.get('Current Designation', '')} — "
+        #         f"{mentor.get('Current Organization', '')}"
+        #     )
 
         st.markdown("**🎯 Core Area of Expertise**")
         st.write(mentor.get("Core Expertise", "Not available"))
