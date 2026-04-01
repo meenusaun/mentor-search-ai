@@ -447,7 +447,11 @@ Instructions:
                 query_vec = model.encode([enriched_query])
                 similarity = cosine_similarity(query_vec, vectors)
                 df["score"] = similarity[0]
-                candidates = df.sort_values(by="score", ascending=False).head(15)
+                # ✅ Sort by score AND name for consistent ordering
+                candidates = df.sort_values(
+                    by=["score", "Name"],
+                    ascending=[False, True]
+                ).head(20)
 
                 mentor_info = ""
                 for _, row in candidates.iterrows():
