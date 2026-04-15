@@ -8,3 +8,4 @@ anthropic
 pdfplumber
 python-docx
 requests
+plotly
