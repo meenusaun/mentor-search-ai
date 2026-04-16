@@ -71,6 +71,8 @@ if st.sidebar.button("🗑️ Clear Chat History"):
     st.session_state.messages = []
     st.session_state.last_recommendations = []
     st.session_state.last_query = ""
+    st.session_state.pending_retry = False
+    st.session_state.retry_query = ""
     st.rerun()
 
 # ------------------ DOCUMENT EXTRACTION UTILS ------------------
@@ -212,6 +214,10 @@ if "last_recommendations" not in st.session_state:
     st.session_state.last_recommendations = []
 if "last_query" not in st.session_state:
     st.session_state.last_query = ""
+if "pending_retry" not in st.session_state:
+    st.session_state.pending_retry = False
+if "retry_query" not in st.session_state:
+    st.session_state.retry_query = ""
 
 # ------------------ INTENT DETECTION ------------------
 def detect_intent(user_input, last_recommendations):
@@ -230,8 +236,44 @@ def detect_intent(user_input, last_recommendations):
     )
     return "followup" if is_followup else "new_search"
 
+# ------------------ AI CALL HELPER ------------------
+def call_ai(prompt, max_tokens=2048):
+    if ai_model == "GPT-4o Mini (OpenAI)":
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return response.choices[0].message.content
+    else:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=max_tokens,
+            temperature=0,
+            system="""You are an AI expert-matching assistant for Resources Network,
+helping Indian founders find the most suitable experts from a curated database.
+
+CORE RULES YOU ALWAYS FOLLOW:
+- Industry match alone is NOT enough for Tier 1
+- Hands-on operator experience alone is NOT enough for Tier 1
+- BOTH must be present for Tier 1
+- When in doubt → Tier 2, not Tier 1
+- Never assume industry match if not clearly stated in the profile
+- Be honest — do not mark Yes for hands-on just because the expert is impressive
+
+MINIMUM RESULT RULES — CRITICAL:
+- You MUST always return at least 1 result total across both tiers
+- If no Tier 1 experts exist, return the best available expert(s) as Tier 2
+- If no strong matches exist at all, return the closest 1-2 experts as Tier 2
+  with an honest Match Reason explaining the partial fit
+- Never return an empty array — always surface the best available option
+- Always respond in the language and format specified in the user message""",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text
+
 # ------------------ DISPLAY SINGLE EXPERT CARD ------------------
-def display_expert_card(expert, index, tier_label, df):
+def display_expert_card(expert, index, tier_label, source_df):
     hands_on = expert.get("Hands On Experience", "").strip()
     if hands_on == "Yes":
         badge = "🟢 Hands-On/Operator"
@@ -286,13 +328,13 @@ def display_expert_card(expert, index, tier_label, df):
         else:
             st.error(f"❌ No Hands-on/Operator Experience — {expert.get('Hands On Details', '')}")
 
-        linkedin_map = df.set_index("Name")["LinkedIn"].to_dict()
+        linkedin_map = source_df.set_index("Name")["LinkedIn"].to_dict()
         linkedin = linkedin_map.get(expert.get("Name", ""), "")
         if linkedin and str(linkedin).strip() != "":
             st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
 
 # ------------------ DISPLAY FULL RESULTS ------------------
-def display_expert_results(ai_recommendations, df):
+def display_expert_results(ai_recommendations, source_df):
     if not ai_recommendations:
         return
 
@@ -306,7 +348,7 @@ def display_expert_results(ai_recommendations, df):
         in the founder's problem area.
         """)
         for i, expert in enumerate(tier1):
-            display_expert_card(expert, i + 1, "Tier 1", df)
+            display_expert_card(expert, i + 1, "Tier 1", source_df)
     else:
         st.warning(
             "⚠️ No Tier 1 matches found — no expert matched both industry "
@@ -321,36 +363,159 @@ def display_expert_results(ai_recommendations, df):
         but not both. They may still provide useful guidance.
         """)
         for i, expert in enumerate(tier2):
-            display_expert_card(expert, i + 1, "Tier 2", df)
+            display_expert_card(expert, i + 1, "Tier 2", source_df)
 
-# ------------------ AI CALL HELPER ------------------
-def call_ai(prompt, max_tokens=2048):
-    if ai_model == "GPT-4o Mini (OpenAI)":
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
+# ------------------ CORE SEARCH FUNCTION ------------------
+def run_search(query, source_df, source_vectors):
+    enriched_query = query
+    if founder_doc_text:
+        enriched_query = (
+            f"{query}\n\n"
+            f"Context from business document:\n{founder_doc_text[:1500]}"
         )
-        return response.choices[0].message.content
-    else:
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=max_tokens,
-            temperature=0,
-            system="""You are an AI expert-matching assistant for Resources Network, 
-helping Indian founders find the most suitable experts from a curated database.
 
-CORE RULES YOU ALWAYS FOLLOW:
+    query_vec = model.encode([enriched_query])
+    similarity = cosine_similarity(query_vec, source_vectors)
+    source_df = source_df.copy()
+    source_df["score"] = similarity[0]
+    candidates = source_df.sort_values(
+        by=["score", "Name"],
+        ascending=[False, True]
+    ).head(20)
+
+    expert_info = ""
+    for _, row in candidates.iterrows():
+        doc_summary = (
+            row["Doc Text"][:500]
+            if row["Doc Text"] and len(row["Doc Text"]) > 50
+            else "Not available"
+        )
+        expert_info += f"""
+Name: {row['Name']}
+Expertise: {row['Expertise']}
+Secondary Expertise: {row['Secondary Expertise']}
+Industry: {row['Industry']}
+Current Designation: {row['Current Designation']}
+Current Organization: {row['Current Organization']}
+Qualification: {row['Qualification']}
+Description: {row['Description']}
+Document Summary: {doc_summary}
+---
+"""
+
+    founder_context_section = ""
+    if founder_doc_text:
+        founder_context_section = f"""
+Founder also uploaded a business document:
+{founder_doc_text[:1500]}
+"""
+
+    previous_context = ""
+    if st.session_state.last_query and st.session_state.last_query != query:
+        previous_context = f"""
+Note: The founder previously searched for: "{st.session_state.last_query}"
+This is a new search. Treat it independently but keep previous context in mind.
+"""
+
+    prompt = f"""
+You are helping an Indian founder find the right expert.
+
+Founder's business brief and problem statement:
+"{query}"
+
+{founder_context_section}
+{previous_context}
+
+Here are expert profiles to evaluate:
+{expert_info}
+
+TIER CLASSIFICATION RULES — This is the most important part:
+
+TIER 1 — Strong Match (show minimum 1, maximum 5):
+An expert qualifies for Tier 1 ONLY if BOTH conditions are true:
+  ✅ Condition 1 — Industry Match: The expert has directly worked IN the same
+     or very closely related industry as the founder's business. Not just advised
+     — actually worked in it as an operator, founder, or senior leader.
+  ✅ Condition 2 — Operator Experience: The expert has PERSONALLY done the
+     specific task or solved the specific problem the founder is facing.
+     Not consulting, not teaching, not advising — actually done it themselves
+     on the ground as an operator.
+
+If even ONE condition is missing → expert goes to Tier 2, NOT Tier 1.
+Be strict. It is better to show 1 Tier 1 expert than to incorrectly
+promote a weak match to Tier 1.
+
+TIER 2 — Partial Match (maximum 5):
+Experts who meet at least ONE of the following:
+  - Matches the industry but lacks operator experience in the specific problem
+  - Has operator experience in the problem area but from a different industry
+  - Has strong relevant expertise that could still be useful to the founder
+
+MINIMUM RESULT GUARANTEE — MANDATORY:
+- You MUST return at least 1 expert total across both tiers
+- If no expert qualifies for Tier 1, place the best available expert(s) in Tier 2
+- If no strong matches exist, return the closest 1–2 experts as Tier 2 with an
+  honest Match Reason that clearly states the fit is partial or indirect
+- NEVER return an empty array under any circumstances
+
+SCORING (apply to all experts regardless of tier):
+- Industry Match: 3 points
+- Operator Experience: 3 points
+- Relevant Expertise: 2 points
+- Key Credentials: 2 points
+
+STRICT RULES:
+- Never put an expert in Tier 1 just because they are impressive or well-qualified
 - Industry match alone is NOT enough for Tier 1
-- Hands-on operator experience alone is NOT enough for Tier 1
+- Operator experience alone is NOT enough for Tier 1
 - BOTH must be present for Tier 1
+- Be honest about Operator Experience: Yes = personally done it,
+  Partial = advised/consulted on it, No = no relevant experience
+- Be CONSISTENT — if an expert's profile does not clearly state they worked
+  in this industry, do NOT assume it
+- If you are not sure whether an expert qualifies for Tier 1, put them in Tier 2
 - When in doubt → Tier 2, not Tier 1
-- Never assume industry match if not clearly stated in the profile
-- Be honest — do not mark Yes for hands-on just because the expert is impressive
-- Always respond in the language and format specified in the user message""",
-            messages=[{"role": "user", "content": prompt}]
+
+Return strictly as a JSON array. Include ALL experts evaluated —
+Tier 1 first (1-5 experts), then Tier 2 (up to 5 experts).
+Total array must have at least 1 object and at most 10 objects.
+
+Format:
+[
+  {{
+    "Tier": "1",
+    "Name": "expert name exactly as given",
+    "Overall Score": "score out of 10 as number only e.g. 8",
+    "Industry Match Score": "score | one line explanation e.g. 3 | Worked in manufacturing exports for 10 years",
+    "Hands On Score": "score | one line explanation e.g. 3 | Personally handled DGFT and LC documentation",
+    "Expertise Score": "score | one line explanation e.g. 2 | Strong supply chain expertise",
+    "Credibility Score": "score | one line explanation — focus on industry recognition, awards, board memberships, publications or speaking engagements e.g. 2 | Featured speaker at CII, board member at 2 startups",
+    "Core Expertise": "1 line — the single most relevant core area of expertise this expert is known for",
+    "Match Reason": "2-3 lines — lead with WHY they qualify for this tier based on industry + operator experience",
+    "Relevant Experience": "specific experience directly relevant to the founder's problem",
+    "Current Designation": "their current designation",
+    "Current Organization": "their current organization",
+    "Qualification": "their qualification",
+    "Hands On Experience": "Yes / No / Partial",
+    "Hands On Details": "1-2 lines on what they have personally done as an operator. If No/Partial, state clearly what is missing."
+  }}
+]
+
+Return only the JSON array. No extra text, no markdown outside the array.
+"""
+
+    ai_raw = call_ai(prompt, max_tokens=3000)
+    cleaned = re.sub(r"```json|```", "", ai_raw).strip()
+
+    try:
+        ai_recommendations = json.loads(cleaned)
+    except json.JSONDecodeError:
+        match_json = re.search(r'\[.*\]', cleaned, re.DOTALL)
+        ai_recommendations = (
+            json.loads(match_json.group()) if match_json else []
         )
-        return response.content[0].text
+
+    return ai_recommendations
 
 # ------------------ RENDER CHAT HISTORY ------------------
 for message in st.session_state.messages:
@@ -360,6 +525,61 @@ for message in st.session_state.messages:
             display_expert_results(message["recommendations"], df)
         elif message.get("type") == "expert_score":
             st.markdown(message["content"])
+        elif message.get("type") == "retry_prompt":
+            st.markdown(message["content"])
+            # Show Yes/No buttons only for the latest retry prompt
+            if message == st.session_state.messages[-1] and st.session_state.pending_retry:
+                col_yes, col_no, col_gap = st.columns([1, 1, 4])
+                with col_yes:
+                    if st.button("✅ Yes", key="retry_yes"):
+                        st.session_state.pending_retry = False
+                        with st.spinner("Retrying your search..."):
+                            try:
+                                retry_results = run_search(
+                                    st.session_state.retry_query, df, vectors
+                                )
+                                if retry_results:
+                                    st.session_state.last_recommendations = retry_results
+                                    t1 = len([r for r in retry_results if r.get("Tier") == "1"])
+                                    t2 = len([r for r in retry_results if r.get("Tier") == "2"])
+                                    retry_summary = (
+                                        f"Found **{t1} Tier 1 expert(s)** and "
+                                        f"**{t2} Tier 2 expert(s)** on retry."
+                                    )
+                                    st.markdown(retry_summary)
+                                    display_expert_results(retry_results, df)
+                                    st.session_state.messages.append({
+                                        "role": "assistant",
+                                        "type": "recommendations",
+                                        "summary": retry_summary,
+                                        "recommendations": retry_results,
+                                        "content": retry_summary
+                                    })
+                                else:
+                                    no_match_msg = (
+                                        "I still couldn't find a match. "
+                                        "Try refining your search with more specific details."
+                                    )
+                                    st.markdown(no_match_msg)
+                                    st.session_state.messages.append({
+                                        "role": "assistant",
+                                        "type": "text",
+                                        "content": no_match_msg
+                                    })
+                            except Exception as e:
+                                st.error(f"Retry Error: {e}")
+                        st.rerun()
+                with col_no:
+                    if st.button("❌ No", key="retry_no"):
+                        st.session_state.pending_retry = False
+                        st.session_state.retry_query = ""
+                        decline_msg = "No problem! Feel free to try a new search anytime."
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "type": "text",
+                            "content": decline_msg
+                        })
+                        st.rerun()
         else:
             st.markdown(message["content"])
 
@@ -428,151 +648,42 @@ Instructions:
     else:
         with st.chat_message("assistant"):
             with st.spinner("Searching for the best experts..."):
-
-                enriched_query = user_input
-                if founder_doc_text:
-                    enriched_query = (
-                        f"{user_input}\n\n"
-                        f"Context from business document:\n{founder_doc_text[:1500]}"
-                    )
-
-                query_vec = model.encode([enriched_query])
-                similarity = cosine_similarity(query_vec, vectors)
-                df["score"] = similarity[0]
-                candidates = df.sort_values(
-                    by=["score", "Name"],
-                    ascending=[False, True]
-                ).head(20)
-
-                expert_info = ""
-                for _, row in candidates.iterrows():
-                    doc_summary = (
-                        row["Doc Text"][:500]
-                        if row["Doc Text"] and len(row["Doc Text"]) > 50
-                        else "Not available"
-                    )
-                    expert_info += f"""
-Name: {row['Name']}
-Expertise: {row['Expertise']}
-Secondary Expertise: {row['Secondary Expertise']}
-Industry: {row['Industry']}
-Current Designation: {row['Current Designation']}
-Current Organization: {row['Current Organization']}
-Qualification: {row['Qualification']}
-Description: {row['Description']}
-Document Summary: {doc_summary}
----
-"""
-
-                founder_context_section = ""
-                if founder_doc_text:
-                    founder_context_section = f"""
-Founder also uploaded a business document:
-{founder_doc_text[:1500]}
-"""
-
-                previous_context = ""
-                if st.session_state.last_query:
-                    previous_context = f"""
-Note: The founder previously searched for: "{st.session_state.last_query}"
-This is a new search. Treat it independently but keep previous context in mind.
-"""
-
-                prompt = f"""
-You are helping an Indian founder find the right expert.
-
-Founder's business brief and problem statement:
-"{user_input}"
-
-{founder_context_section}
-{previous_context}
-
-Here are expert profiles to evaluate:
-{expert_info}
-
-TIER CLASSIFICATION RULES — This is the most important part:
-
-TIER 1 — Strong Match (show minimum 1, maximum 5):
-An expert qualifies for Tier 1 ONLY if BOTH conditions are true:
-  ✅ Condition 1 — Industry Match: The expert has directly worked IN the same
-     or very closely related industry as the founder's business. Not just advised
-     — actually worked in it as an operator, founder, or senior leader.
-  ✅ Condition 2 — Operator Experience: The expert has PERSONALLY done the
-     specific task or solved the specific problem the founder is facing.
-     Not consulting, not teaching, not advising — actually done it themselves
-     on the ground as an operator.
-
-If even ONE condition is missing → expert goes to Tier 2, NOT Tier 1.
-Be strict. It is better to show 1 Tier 1 expert than to incorrectly
-promote a weak match to Tier 1.
-
-TIER 2 — Partial Match (maximum 5):
-Experts who meet at least ONE of the following:
-  - Matches the industry but lacks operator experience in the specific problem
-  - Has operator experience in the problem area but from a different industry
-  - Has strong relevant expertise that could still be useful to the founder
-
-SCORING (apply to all experts regardless of tier):
-- Industry Match: 3 points
-- Operator Experience: 3 points
-- Relevant Expertise: 2 points
-- Key Credentials: 2 points
-
-STRICT RULES:
-- Never put an expert in Tier 1 just because they are impressive or well-qualified
-- Industry match alone is NOT enough for Tier 1
-- Operator experience alone is NOT enough for Tier 1
-- BOTH must be present for Tier 1
-- Be honest about Operator Experience: Yes = personally done it,
-  Partial = advised/consulted on it, No = no relevant experience
-- Be CONSISTENT — if an expert's profile does not clearly state they worked
-  in this industry, do NOT assume it
-- If you are not sure whether an expert qualifies for Tier 1, put them in Tier 2
-- When in doubt → Tier 2, not Tier 1
-
-Return strictly as a JSON array. Include ALL experts evaluated —
-Tier 1 first (1-5 experts), then Tier 2 (up to 5 experts).
-Total array can have between 2 and 10 objects.
-
-Format:
-[
-  {{
-    "Tier": "1",
-    "Name": "expert name exactly as given",
-    "Overall Score": "score out of 10 as number only e.g. 8",
-    "Industry Match Score": "score | one line explanation e.g. 3 | Worked in manufacturing exports for 10 years",
-    "Hands On Score": "score | one line explanation e.g. 3 | Personally handled DGFT and LC documentation",
-    "Expertise Score": "score | one line explanation e.g. 2 | Strong supply chain expertise",
-    "Credibility Score": "score | one line explanation — focus on industry recognition, awards, board memberships, publications or speaking engagements e.g. 2 | Featured speaker at CII, board member at 2 startups",
-    "Core Expertise": "1 line — the single most relevant core area of expertise this expert is known for",
-    "Match Reason": "2-3 lines — lead with WHY they qualify for this tier based on industry + operator experience",
-    "Relevant Experience": "specific experience directly relevant to the founder's problem",
-    "Current Designation": "their current designation",
-    "Current Organization": "their current organization",
-    "Qualification": "their qualification",
-    "Hands On Experience": "Yes / No / Partial",
-    "Hands On Details": "1-2 lines on what they have personally done as an operator. If No/Partial, state clearly what is missing."
-  }}
-]
-
-Return only the JSON array. No extra text, no markdown outside the array.
-"""
-
                 try:
-                    ai_raw = call_ai(prompt, max_tokens=3000)
+                    ai_recommendations = run_search(user_input, df, vectors)
 
-                    cleaned = re.sub(r"```json|```", "", ai_raw).strip()
-                    try:
-                        ai_recommendations = json.loads(cleaned)
-                    except json.JSONDecodeError:
-                        match_json = re.search(r'\[.*\]', cleaned, re.DOTALL)
-                        ai_recommendations = (
-                            json.loads(match_json.group()) if match_json else []
+                    # ── ZERO RESULTS → trigger retry prompt ──
+                    if not ai_recommendations:
+                        st.session_state.pending_retry = True
+                        st.session_state.retry_query = user_input
+
+                        retry_msg = (
+                            "🔍 Looks like I encountered a glitch and couldn't retrieve results. "
+                            "Shall I try again?\n\n**Type Yes or No, or use the buttons below.**"
                         )
+                        st.markdown(retry_msg)
 
-                    if ai_recommendations:
+                        col_yes, col_no, col_gap = st.columns([1, 1, 4])
+                        with col_yes:
+                            if st.button("✅ Yes", key="inline_retry_yes"):
+                                st.session_state.pending_retry = False
+                                st.rerun()
+                        with col_no:
+                            if st.button("❌ No", key="inline_retry_no"):
+                                st.session_state.pending_retry = False
+                                st.session_state.retry_query = ""
+                                st.rerun()
+
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "type": "retry_prompt",
+                            "content": retry_msg
+                        })
+
+                    else:
+                        # ── RESULTS FOUND ──
                         st.session_state.last_recommendations = ai_recommendations
                         st.session_state.last_query = user_input
+                        st.session_state.pending_retry = False
 
                         tier1_count = len(
                             [m for m in ai_recommendations if m.get("Tier") == "1"]
@@ -599,20 +710,34 @@ Return only the JSON array. No extra text, no markdown outside the array.
                             "recommendations": ai_recommendations,
                             "content": summary
                         })
-                    else:
-                        fallback = (
-                            "I could not find strong matches. "
-                            "Could you describe your business problem in more detail?"
-                        )
-                        st.markdown(fallback)
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "type": "text",
-                            "content": fallback
-                        })
 
                 except Exception as e:
-                    st.error(f"AI Error: {e}")
+                    # ── EXCEPTION → also trigger retry ──
+                    st.session_state.pending_retry = True
+                    st.session_state.retry_query = user_input
+
+                    retry_msg = (
+                        "🔍 Looks like I encountered a glitch and couldn't retrieve results. "
+                        "Shall I try again?\n\n**Type Yes or No, or use the buttons below.**"
+                    )
+                    st.markdown(retry_msg)
+
+                    col_yes, col_no, col_gap = st.columns([1, 1, 4])
+                    with col_yes:
+                        if st.button("✅ Yes", key="err_retry_yes"):
+                            st.session_state.pending_retry = False
+                            st.rerun()
+                    with col_no:
+                        if st.button("❌ No", key="err_retry_no"):
+                            st.session_state.pending_retry = False
+                            st.session_state.retry_query = ""
+                            st.rerun()
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "type": "retry_prompt",
+                        "content": retry_msg
+                    })
 
     # -------- UPLOADED EXPERT PROFILE SCORING --------
     if expert_profile_text and st.session_state.last_recommendations:
