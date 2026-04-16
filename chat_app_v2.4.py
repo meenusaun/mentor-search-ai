@@ -515,6 +515,37 @@ Return only the JSON array. No extra text, no markdown outside the array.
             json.loads(match_json.group()) if match_json else []
         )
 
+    # ── PYTHON-LEVEL FALLBACK ──────────────────────────────────────────
+    # If AI still returned empty despite the prompt guarantee,
+    # force the top 2 semantically scored experts in as Tier 2
+    if not ai_recommendations:
+        fallback_candidates = candidates.head(2)
+        for _, row in fallback_candidates.iterrows():
+            ai_recommendations.append({
+                "Tier": "2",
+                "Name": row.get("Name", "Unknown"),
+                "Overall Score": "4",
+                "Industry Match Score": "1 | Closest available match — no strong industry alignment found",
+                "Hands On Score": "1 | Limited operator experience confirmed for this requirement",
+                "Expertise Score": "1 | Some relevant expertise may apply",
+                "Credibility Score": "1 | Profile available for review",
+                "Core Expertise": row.get("Expertise", "Not specified"),
+                "Match Reason": (
+                    "No strong match found for this requirement. "
+                    "This expert is the closest available in the network based on semantic similarity. "
+                    "Suitability should be verified manually before outreach."
+                ),
+                "Relevant Experience": row.get("Description", "")[:300],
+                "Current Designation": row.get("Current Designation", ""),
+                "Current Organization": row.get("Current Organization", ""),
+                "Qualification": row.get("Qualification", ""),
+                "Hands On Experience": "No",
+                "Hands On Details": (
+                    "Hands-on fit for this specific requirement could not be confirmed. "
+                    "Please review the full profile before proceeding."
+                )
+            })
+
     return ai_recommendations
 
 # ------------------ RENDER CHAT HISTORY ------------------
@@ -531,53 +562,45 @@ for message in st.session_state.messages:
             if message == st.session_state.messages[-1] and st.session_state.pending_retry:
                 col_yes, col_no, col_gap = st.columns([1, 1, 4])
                 with col_yes:
-                    if st.button("✅ Yes", key="retry_yes"):
+                    if st.button("✅ Yes, retry", key="retry_yes"):
+                        retry_q = st.session_state.retry_query
                         st.session_state.pending_retry = False
+                        st.session_state.messages.append({
+                            "role": "user", "content": "Yes"
+                        })
                         with st.spinner("Retrying your search..."):
                             try:
-                                retry_results = run_search(
-                                    st.session_state.retry_query, df, vectors
+                                retry_results = run_search(retry_q, df, vectors)
+                                st.session_state.last_recommendations = retry_results
+                                st.session_state.last_query = retry_q
+                                t1 = len([r for r in retry_results if r.get("Tier") == "1"])
+                                t2 = len([r for r in retry_results if r.get("Tier") == "2"])
+                                retry_summary = (
+                                    f"Found **{t1} Tier 1 expert(s)** and "
+                                    f"**{t2} Tier 2 expert(s)**."
                                 )
-                                if retry_results:
-                                    st.session_state.last_recommendations = retry_results
-                                    t1 = len([r for r in retry_results if r.get("Tier") == "1"])
-                                    t2 = len([r for r in retry_results if r.get("Tier") == "2"])
-                                    retry_summary = (
-                                        f"Found **{t1} Tier 1 expert(s)** and "
-                                        f"**{t2} Tier 2 expert(s)** on retry."
-                                    )
-                                    st.markdown(retry_summary)
-                                    display_expert_results(retry_results, df)
-                                    st.session_state.messages.append({
-                                        "role": "assistant",
-                                        "type": "recommendations",
-                                        "summary": retry_summary,
-                                        "recommendations": retry_results,
-                                        "content": retry_summary
-                                    })
-                                else:
-                                    no_match_msg = (
-                                        "I still couldn't find a match. "
-                                        "Try refining your search with more specific details."
-                                    )
-                                    st.markdown(no_match_msg)
-                                    st.session_state.messages.append({
-                                        "role": "assistant",
-                                        "type": "text",
-                                        "content": no_match_msg
-                                    })
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "type": "recommendations",
+                                    "summary": retry_summary,
+                                    "recommendations": retry_results,
+                                    "content": retry_summary
+                                })
                             except Exception as e:
-                                st.error(f"Retry Error: {e}")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "type": "text",
+                                    "content": f"Sorry, encountered an error: {e}"
+                                })
                         st.rerun()
                 with col_no:
-                    if st.button("❌ No", key="retry_no"):
+                    if st.button("❌ No, cancel", key="retry_no"):
                         st.session_state.pending_retry = False
                         st.session_state.retry_query = ""
-                        decline_msg = "No problem! Feel free to try a new search anytime."
                         st.session_state.messages.append({
                             "role": "assistant",
                             "type": "text",
-                            "content": decline_msg
+                            "content": "No problem! Feel free to try a new search anytime."
                         })
                         st.rerun()
         else:
@@ -664,13 +687,46 @@ Instructions:
 
                         col_yes, col_no, col_gap = st.columns([1, 1, 4])
                         with col_yes:
-                            if st.button("✅ Yes", key="inline_retry_yes"):
+                            if st.button("✅ Yes, retry", key="inline_retry_yes"):
+                                retry_q = st.session_state.retry_query
                                 st.session_state.pending_retry = False
+                                st.session_state.messages.append({
+                                    "role": "user", "content": "Yes"
+                                })
+                                with st.spinner("Retrying your search..."):
+                                    try:
+                                        retry_results = run_search(retry_q, df, vectors)
+                                        st.session_state.last_recommendations = retry_results
+                                        st.session_state.last_query = retry_q
+                                        t1 = len([r for r in retry_results if r.get("Tier") == "1"])
+                                        t2 = len([r for r in retry_results if r.get("Tier") == "2"])
+                                        retry_summary = (
+                                            f"Found **{t1} Tier 1 expert(s)** and "
+                                            f"**{t2} Tier 2 expert(s)**."
+                                        )
+                                        st.session_state.messages.append({
+                                            "role": "assistant",
+                                            "type": "recommendations",
+                                            "summary": retry_summary,
+                                            "recommendations": retry_results,
+                                            "content": retry_summary
+                                        })
+                                    except Exception as e:
+                                        st.session_state.messages.append({
+                                            "role": "assistant",
+                                            "type": "text",
+                                            "content": f"Sorry, encountered an error: {e}"
+                                        })
                                 st.rerun()
                         with col_no:
-                            if st.button("❌ No", key="inline_retry_no"):
+                            if st.button("❌ No, cancel", key="inline_retry_no"):
                                 st.session_state.pending_retry = False
                                 st.session_state.retry_query = ""
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "type": "text",
+                                    "content": "No problem! Feel free to try a new search anytime."
+                                })
                                 st.rerun()
 
                         st.session_state.messages.append({
@@ -724,13 +780,46 @@ Instructions:
 
                     col_yes, col_no, col_gap = st.columns([1, 1, 4])
                     with col_yes:
-                        if st.button("✅ Yes", key="err_retry_yes"):
+                        if st.button("✅ Yes, retry", key="err_retry_yes"):
+                            retry_q = st.session_state.retry_query
                             st.session_state.pending_retry = False
+                            st.session_state.messages.append({
+                                "role": "user", "content": "Yes"
+                            })
+                            with st.spinner("Retrying your search..."):
+                                try:
+                                    retry_results = run_search(retry_q, df, vectors)
+                                    st.session_state.last_recommendations = retry_results
+                                    st.session_state.last_query = retry_q
+                                    t1 = len([r for r in retry_results if r.get("Tier") == "1"])
+                                    t2 = len([r for r in retry_results if r.get("Tier") == "2"])
+                                    retry_summary = (
+                                        f"Found **{t1} Tier 1 expert(s)** and "
+                                        f"**{t2} Tier 2 expert(s)**."
+                                    )
+                                    st.session_state.messages.append({
+                                        "role": "assistant",
+                                        "type": "recommendations",
+                                        "summary": retry_summary,
+                                        "recommendations": retry_results,
+                                        "content": retry_summary
+                                    })
+                                except Exception as e:
+                                    st.session_state.messages.append({
+                                        "role": "assistant",
+                                        "type": "text",
+                                        "content": f"Sorry, encountered an error: {e}"
+                                    })
                             st.rerun()
                     with col_no:
-                        if st.button("❌ No", key="err_retry_no"):
+                        if st.button("❌ No, cancel", key="err_retry_no"):
                             st.session_state.pending_retry = False
                             st.session_state.retry_query = ""
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "type": "text",
+                                "content": "No problem! Feel free to try a new search anytime."
+                            })
                             st.rerun()
 
                     st.session_state.messages.append({
