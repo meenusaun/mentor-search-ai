@@ -77,14 +77,26 @@ if st.sidebar.button("🗑️ Clear Chat & History"):
     st.session_state.search_history = []
     st.rerun()
 
-# ------------------ SIDEBAR: PROMPT HISTORY (compact) ------------------
-# Sidebar shows count only — full history shown inline above chat input
+# ------------------ SIDEBAR: RECENT SEARCHES ------------------
 st.sidebar.markdown("---")
-history_count = len(st.session_state.get("search_history", []))
-if history_count > 0:
-    st.sidebar.caption(f"🕘 **{history_count}** recent search(es) — scroll down to view history")
+st.sidebar.subheader("🕘 Recent Searches")
+
+if not st.session_state.get("search_history"):
+    st.sidebar.caption("No searches yet. Your recent prompts will appear here.")
 else:
-    st.sidebar.caption("🕘 No searches yet")
+    recent_prompts = list(reversed(st.session_state.search_history))[:10]
+    for i, item in enumerate(recent_prompts):
+        label = item["query"][:40] + ("…" if len(item["query"]) > 40 else "")
+        meta  = f"🏆{item['tier1']} · 🔍{item['tier2']}  {item['timestamp']}"
+        if st.sidebar.button(
+            f"↩ {label}",
+            key=f"sidebar_rerun_{i}",
+            use_container_width=True,
+            help=item["query"]   # full query on hover
+        ):
+            st.session_state._rerun_query = item["query"]
+            st.rerun()
+        st.sidebar.caption(meta)
 
 # ------------------ DOCUMENT EXTRACTION UTILS ------------------
 def extract_text_from_pdf_bytes(file_bytes):
@@ -710,41 +722,6 @@ for message in st.session_state.messages:
                         st.rerun()
         else:
             st.markdown(message["content"])
-
-# ------------------ INLINE PROMPT HISTORY PANEL ------------------
-# Shows last 10 prompts as clickable chips above the chat input.
-# Clicking a chip sets _rerun_query and reruns — no extra API calls
-# until the query is actually processed below. Zero perf impact.
-
-if st.session_state.get("search_history"):
-    recent_history = list(reversed(st.session_state.search_history))[:10]
-
-    st.markdown(
-        "<div style='margin-bottom:4px;font-size:13px;color:#888;font-weight:500;'>"
-        "🕘 Recent searches — click to re-run</div>",
-        unsafe_allow_html=True
-    )
-
-    # Render chips in rows of 2
-    for row_start in range(0, len(recent_history), 2):
-        row_items = recent_history[row_start:row_start + 2]
-        cols = st.columns(len(row_items))
-        for col, item in zip(cols, row_items):
-            with col:
-                label = item["query"][:55] + ("…" if len(item["query"]) > 55 else "")
-                meta  = f"🏆{item['tier1']} · 🔍{item['tier2']}  |  {item['timestamp']}"
-                # Chip button — full width, styled via markdown caption
-                if st.button(
-                    f"↩ {label}",
-                    key=f"chip_{row_start}_{row_items.index(item)}",
-                    use_container_width=True,
-                    help=item["query"]           # full query shown on hover
-                ):
-                    st.session_state._rerun_query = item["query"]
-                    st.rerun()
-                st.caption(meta)
-
-    st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
 
 # ------------------ HANDLE RE-RUN FROM HISTORY ------------------
 if st.session_state.get("_rerun_query"):
