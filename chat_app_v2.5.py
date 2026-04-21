@@ -77,46 +77,6 @@ if st.sidebar.button("🗑️ Clear Chat & History"):
     st.session_state.search_history = []
     st.rerun()
 
-# ------------------ PROGRAM FILTER ------------------
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 Filter by Program")
-st.sidebar.caption("Leave empty to search all mentors.")
-
-# Build program list dynamically from Excel
-_all_programs = sorted(set(
-    p.strip()
-    for val in df["Program"]
-    for p in str(val).split(",")
-    if p.strip() and p.strip().lower() not in ("nan", "none", "")
-))
-
-selected_programs = st.sidebar.multiselect(
-    "Program(s)",
-    options=_all_programs,
-    default=[],
-    key="program_filter",
-    placeholder="All programs"
-)
-
-# Apply filter — derive filtered_df and filtered_vectors used in all searches
-if selected_programs:
-    _prog_mask = df["Program"].apply(
-        lambda x: any(
-            sel.strip() in [p.strip() for p in str(x).split(",")]
-            for sel in selected_programs
-        )
-    )
-    filtered_df = df[_prog_mask].reset_index(drop=True)
-    filtered_vectors = get_vectors(filtered_df["combined"].tolist())
-    st.sidebar.info(
-        f"🔎 Searching **{len(filtered_df)}** mentor(s) in: "
-        f"{', '.join(selected_programs)}"
-    )
-else:
-    filtered_df = df
-    filtered_vectors = vectors
-    st.sidebar.caption(f"🔎 Searching all **{len(df)}** mentors")
-
 # ------------------ SIDEBAR: PROMPT HISTORY (compact) ------------------
 # Sidebar shows count only — full history shown inline above chat input
 st.sidebar.markdown("---")
@@ -246,6 +206,48 @@ def get_vectors(texts):
     return model.encode(texts, batch_size=64, show_progress_bar=False)
 
 vectors = get_vectors(df["combined"].tolist())
+
+# ------------------ PROGRAM FILTER ------------------
+# Placed here so df and vectors are both available.
+# Sidebar widgets defined after df is loaded — Streamlit renders them top-to-bottom
+# in the sidebar regardless of where in the script they are written.
+
+_all_programs = sorted(set(
+    p.strip()
+    for val in df["Program"]
+    for p in str(val).split(",")
+    if p.strip() and p.strip().lower() not in ("nan", "none", "")
+))
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 Filter by Program")
+st.sidebar.caption("Leave empty to search all mentors.")
+
+selected_programs = st.sidebar.multiselect(
+    "Program(s)",
+    options=_all_programs,
+    default=[],
+    key="program_filter",
+    placeholder="All programs"
+)
+
+if selected_programs:
+    _prog_mask = df["Program"].apply(
+        lambda x: any(
+            sel.strip() in [p.strip() for p in str(x).split(",")]
+            for sel in selected_programs
+        )
+    )
+    filtered_df = df[_prog_mask].reset_index(drop=True)
+    filtered_vectors = get_vectors(filtered_df["combined"].tolist())
+    st.sidebar.info(
+        f"🔎 **{len(filtered_df)}** mentor(s) in: "
+        f"{', '.join(selected_programs)}"
+    )
+else:
+    filtered_df = df
+    filtered_vectors = vectors
+    st.sidebar.caption(f"🔎 Searching all **{len(df)}** mentors")
 
 # ------------------ EXTRACT UPLOADED FILE TEXTS ------------------
 founder_doc_text = ""
