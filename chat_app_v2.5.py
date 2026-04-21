@@ -7,11 +7,10 @@ import anthropic
 import os
 import json
 import re
+from datetime import datetime
 import pdfplumber
 import docx
 from io import BytesIO
-import plotly.express as px
-import plotly.graph_objects as go
 
 # ------------------ CLIENTS ------------------
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
@@ -69,11 +68,23 @@ expert_uploaded_file = st.sidebar.file_uploader(
 
 # ------------------ CLEAR CHAT BUTTON ------------------
 st.sidebar.markdown("---")
-if st.sidebar.button("🗑️ Clear Chat History"):
+if st.sidebar.button("🗑️ Clear Chat & History"):
     st.session_state.messages = []
     st.session_state.last_recommendations = []
     st.session_state.last_query = ""
+    st.session_state.pending_retry = False
+    st.session_state.retry_query = ""
+    st.session_state.search_history = []
     st.rerun()
+
+# ------------------ SIDEBAR: PROMPT HISTORY (compact) ------------------
+# Sidebar shows count only — full history shown inline above chat input
+st.sidebar.markdown("---")
+history_count = len(st.session_state.get("search_history", []))
+if history_count > 0:
+    st.sidebar.caption(f"🕘 **{history_count}** recent search(es) — scroll down to view history")
+else:
+    st.sidebar.caption("🕘 No searches yet")
 
 # ------------------ DOCUMENT EXTRACTION UTILS ------------------
 def extract_text_from_pdf_bytes(file_bytes):
@@ -147,7 +158,7 @@ def load_data():
         "Description", "Expertise Tags", "Industry Tags",
         "Document Path", "LinkedIn", "Qualification",
         "Current Organization", "Current Designation",
-        "Program", "Years of Experience", "Sector"
+        "Program", "Years of Experience"
     ]
     for col in required_cols:
         if col not in df.columns:
@@ -176,6 +187,11 @@ def load_data():
     return df
 
 df = load_data()
+
+# ── Lookup dicts built once at startup — fast O(1) access per card ──
+program_lookup    = df.set_index("Name")["Program"].to_dict()           if "Program"            in df.columns else {}
+experience_lookup = df.set_index("Name")["Years of Experience"].to_dict() if "Years of Experience" in df.columns else {}
+linkedin_lookup   = df.set_index("Name")["LinkedIn"].to_dict()           if "LinkedIn"           in df.columns else {}
 
 # ------------------ LOAD MODEL ------------------
 @st.cache_resource
@@ -215,198 +231,63 @@ if "last_recommendations" not in st.session_state:
     st.session_state.last_recommendations = []
 if "last_query" not in st.session_state:
     st.session_state.last_query = ""
+if "pending_retry" not in st.session_state:
+    st.session_state.pending_retry = False
+if "retry_query" not in st.session_state:
+    st.session_state.retry_query = ""
+if "search_history" not in st.session_state:
+    st.session_state.search_history = []  # max 10 items, {query, timestamp, tier1, tier2}
 
-# ============================================================
-# TAB LAYOUT — Search | Network Insights
-# ============================================================
-tab_search, tab_insights = st.tabs(["🔍 Expert Search", "📊 Network Insights"])
+# ------------------ SAVE TO HISTORY HELPER ------------------
+def save_to_history(query, tier1_count, tier2_count):
+    """Saves a search to history. Keeps only the last 10 unique queries."""
+    # Remove duplicate if same query already exists
+    st.session_state.search_history = [
+        h for h in st.session_state.search_history
+        if h["query"].strip().lower() != query.strip().lower()
+    ]
+    st.session_state.search_history.append({
+        "query": query,
+        "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "tier1": tier1_count,
+        "tier2": tier2_count,
+    })
+    # Keep only latest 10
+    if len(st.session_state.search_history) > 10:
+        st.session_state.search_history = st.session_state.search_history[-10:]
 
-# ============================================================
-# TAB 1 — EXPERT SEARCH
-# ============================================================
-with tab_search:
-
-    # ------------------ PROGRAM FILTER ------------------
-    st.markdown("### 🎯 Filter by Program")
-    all_programs = sorted(
-        set(
-            p.strip()
-            for progs in df["Program"].dropna()
-            for p in str(progs).split(",")
-            if p.strip() and p.strip() != ""
-        )
+# ------------------ INTENT DETECTION ------------------
+def detect_intent(user_input, last_recommendations):
+    followup_keywords = [
+        "tell me more", "more about", "compare", "vs", "versus",
+        "which is better", "difference between", "what about",
+        "explain", "elaborate", "details about", "why is", "how is",
+        "refine", "show more", "different", "another", "instead",
+        "same industry", "similar", "like #", "expert #", "first expert",
+        "second expert", "third expert", "top expert", "number"
+    ]
+    input_lower = user_input.lower()
+    has_recommendations = len(last_recommendations) > 0
+    is_followup = has_recommendations and any(
+        kw in input_lower for kw in followup_keywords
     )
+    return "followup" if is_followup else "new_search"
 
-    selected_programs = st.multiselect(
-        "Select Program(s) — leave empty to search all programs",
-        options=all_programs,
-        default=[],
-        help="Filter experts to only those onboarded for specific programs"
-    )
-
-    # Apply program filter to working dataframe
-    if selected_programs:
-        mask = df["Program"].apply(
-            lambda x: any(
-                prog.strip() in [p.strip() for p in str(x).split(",")]
-                for prog in selected_programs
-            )
+# ------------------ AI CALL HELPER ------------------
+def call_ai(prompt, max_tokens=2048):
+    if ai_model == "GPT-4o Mini (OpenAI)":
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
         )
-        filtered_df = df[mask].reset_index(drop=True)
-        filtered_vectors = get_vectors(filtered_df["combined"].tolist())
-        st.info(
-            f"🔎 Searching across **{len(filtered_df)} expert(s)** "
-            f"onboarded for: **{', '.join(selected_programs)}**"
-        )
+        return response.choices[0].message.content
     else:
-        filtered_df = df
-        filtered_vectors = vectors
-        st.info(f"🔎 Searching across all **{len(filtered_df)} experts** in the network")
-
-    st.markdown("---")
-
-    # ------------------ INTENT DETECTION ------------------
-    def detect_intent(user_input, last_recommendations):
-        followup_keywords = [
-            "tell me more", "more about", "compare", "vs", "versus",
-            "which is better", "difference between", "what about",
-            "explain", "elaborate", "details about", "why is", "how is",
-            "refine", "show more", "different", "another", "instead",
-            "same industry", "similar", "like #", "expert #", "first expert",
-            "second expert", "third expert", "top expert", "number"
-        ]
-        input_lower = user_input.lower()
-        has_recommendations = len(last_recommendations) > 0
-        is_followup = has_recommendations and any(
-            kw in input_lower for kw in followup_keywords
-        )
-        return "followup" if is_followup else "new_search"
-
-    # ------------------ DISPLAY SINGLE EXPERT CARD ------------------
-    def display_expert_card(expert, index, tier_label, source_df):
-        hands_on = expert.get("Hands On Experience", "").strip()
-        if hands_on == "Yes":
-            badge = "🟢 Hands-On/Operator"
-        elif hands_on == "Partial":
-            badge = "🟡 Partial Hands-on/Operator Experience"
-        else:
-            badge = "🔴 No Direct Experience"
-
-        overall = expert.get("Overall Score", "N/A")
-
-        with st.expander(
-            f"#{index} — {expert.get('Name', 'N/A')} | "
-            f"⭐ {overall}/10 | {badge}",
-            expanded=(index == 1)
-        ):
-            # Program badge
-            expert_name = expert.get("Name", "")
-            program_val = ""
-            if expert_name and "Name" in source_df.columns and "Program" in source_df.columns:
-                match = source_df[source_df["Name"] == expert_name]
-                if not match.empty:
-                    program_val = match.iloc[0].get("Program", "")
-            if program_val and str(program_val).strip():
-                programs_list = [p.strip() for p in str(program_val).split(",") if p.strip()]
-                badges_html = " ".join(
-                    [f"<span style='background:#1F4E79;color:white;padding:2px 10px;"
-                     f"border-radius:12px;font-size:12px;margin-right:4px;'>📌 {p}</span>"
-                     for p in programs_list]
-                )
-                st.markdown(f"**Program:** {badges_html}", unsafe_allow_html=True)
-                st.write("")
-
-            st.markdown("### 📊 Match Scorecard")
-            sc1, sc2, sc3, sc4 = st.columns(4)
-
-            for col, key, label, max_val in [
-                (sc1, "Industry Match Score", "🏭 Industry Match", "3"),
-                (sc2, "Hands On Score", "🛠️ Hands-on/Operator Experience", "3"),
-                (sc3, "Expertise Score", "💼 Expertise", "2"),
-                (sc4, "Credibility Score", "🏅 Key Credentials", "2"),
-            ]:
-                with col:
-                    raw = expert.get(key, "N/A")
-                    parts = (
-                        raw.split("|")
-                        if isinstance(raw, str) and "|" in raw
-                        else [raw, ""]
-                    )
-                    st.metric(label, f"{parts[0].strip()} / {max_val}")
-                    if len(parts) > 1:
-                        st.caption(parts[1].strip())
-
-            st.markdown("---")
-
-            st.markdown("**🎯 Core Area of Expertise**")
-            st.write(expert.get("Core Expertise", "Not available"))
-
-            st.markdown("**✅ Why Suitable**")
-            st.write(expert.get("Match Reason", ""))
-
-            st.markdown("**💼 Relevant Experience**")
-            st.write(expert.get("Relevant Experience", ""))
-
-            st.markdown("**🛠️ Hands-on/Operator Experience in Founder's Area**")
-            if hands_on == "Yes":
-                st.success(f"✅ Yes — Hands-on/Operator — {expert.get('Hands On Details', '')}")
-            elif hands_on == "Partial":
-                st.warning(f"⚠️ Partial Hands-on/Operator — {expert.get('Hands On Details', '')}")
-            else:
-                st.error(f"❌ No Hands-on/Operator Experience — {expert.get('Hands On Details', '')}")
-
-            linkedin_map = source_df.set_index("Name")["LinkedIn"].to_dict()
-            linkedin = linkedin_map.get(expert.get("Name", ""), "")
-            if linkedin and str(linkedin).strip() != "":
-                st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
-
-    # ------------------ DISPLAY FULL RESULTS ------------------
-    def display_expert_results(ai_recommendations, source_df):
-        if not ai_recommendations:
-            return
-
-        tier1 = [m for m in ai_recommendations if m.get("Tier") == "1"]
-        tier2 = [m for m in ai_recommendations if m.get("Tier") == "2"]
-
-        if tier1:
-            st.markdown("""
-            ## 🏆 Tier 1 — Strong Matches
-            > These experts match **both the industry AND have hands-on operator experience**
-            in the founder's problem area.
-            """)
-            for i, expert in enumerate(tier1):
-                display_expert_card(expert, i + 1, "Tier 1", source_df)
-        else:
-            st.warning(
-                "⚠️ No Tier 1 matches found — no expert matched both industry "
-                "AND operator experience for this requirement."
-            )
-
-        if tier2:
-            st.markdown("---")
-            st.markdown("""
-            ## 🔍 Tier 2 — Partial Matches
-            > These experts match **either the industry OR have relevant experience**
-            but not both. They may still provide useful guidance.
-            """)
-            for i, expert in enumerate(tier2):
-                display_expert_card(expert, i + 1, "Tier 2", source_df)
-
-    # ------------------ AI CALL HELPER ------------------
-    def call_ai(prompt, max_tokens=2048):
-        if ai_model == "GPT-4o Mini (OpenAI)":
-            response = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0
-            )
-            return response.choices[0].message.content
-        else:
-            response = anthropic_client.messages.create(
-                model="claude-sonnet-4-5",
-                max_tokens=max_tokens,
-                temperature=0,
-                system="""You are an AI expert-matching assistant for Resources Network,
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=max_tokens,
+            temperature=0,
+            system="""You are an AI expert-matching assistant for Resources Network,
 helping Indian founders find the most suitable experts from a curated database.
 
 CORE RULES YOU ALWAYS FOLLOW:
@@ -416,123 +297,176 @@ CORE RULES YOU ALWAYS FOLLOW:
 - When in doubt → Tier 2, not Tier 1
 - Never assume industry match if not clearly stated in the profile
 - Be honest — do not mark Yes for hands-on just because the expert is impressive
+
+MINIMUM RESULT RULES — CRITICAL:
+- You MUST always return at least 1 result total across both tiers
+- If no Tier 1 experts exist, return the best available expert(s) as Tier 2
+- If no strong matches exist at all, return the closest 1-2 experts as Tier 2
+  with an honest Match Reason explaining the partial fit
+- Never return an empty array — always surface the best available option
 - Always respond in the language and format specified in the user message""",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.content[0].text
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text
 
-    # ------------------ RENDER CHAT HISTORY ------------------
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            if message.get("type") == "recommendations":
-                st.markdown(message["summary"])
-                display_expert_results(message["recommendations"], filtered_df)
-            elif message.get("type") == "expert_score":
-                st.markdown(message["content"])
-            else:
-                st.markdown(message["content"])
-
-    # ------------------ USER INPUT ------------------
-    user_input = st.chat_input(
-        "Describe your business, ask a follow-up, or start a new search..."
+# ------------------ PROGRAM BADGE HELPER ------------------
+def render_program_badge(expert_name):
+    prog_val = program_lookup.get(expert_name, "").strip()
+    if not prog_val or prog_val.lower() in ("", "nan", "none"):
+        return
+    prog_list = [p.strip() for p in prog_val.split(",") if p.strip()]
+    if not prog_list:
+        return
+    badges_html = " ".join([
+        f"<span style='background:#1F4E79;color:white;padding:3px 10px;"
+        f"border-radius:12px;font-size:12px;margin-right:4px;font-weight:500;'>"
+        f"📌 {p}</span>"
+        for p in prog_list
+    ])
+    st.markdown(
+        f"<div style='margin-bottom:8px;'>"
+        f"<span style='font-size:13px;color:#555;font-weight:500;'>Program: </span>"
+        f"{badges_html}</div>",
+        unsafe_allow_html=True
     )
 
-    # ------------------ PROCESS INPUT ------------------
-    if user_input:
+# ------------------ EXPERIENCE BADGE HELPER ------------------
+def render_experience_badge(expert_name):
+    exp_val = experience_lookup.get(expert_name, "").strip()
+    if not exp_val or exp_val.lower() in ("", "nan", "none"):
+        return
+    st.markdown(
+        f"<div style='margin-bottom:12px;'>"
+        f"<span style='font-size:13px;color:#555;font-weight:500;'>Experience: </span>"
+        f"<span style='background:#E2EFDA;color:#375623;padding:3px 10px;"
+        f"border-radius:12px;font-size:12px;font-weight:500;'>"
+        f"🏅 {exp_val}</span></div>",
+        unsafe_allow_html=True
+    )
 
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        st.session_state.messages.append({"role": "user", "content": user_input})
+# ------------------ DISPLAY SINGLE EXPERT CARD ------------------
+def display_expert_card(expert, index, tier_label, source_df):
+    hands_on = expert.get("Hands On Experience", "").strip()
+    if hands_on == "Yes":
+        badge = "🟢 Hands-On/Operator"
+    elif hands_on == "Partial":
+        badge = "🟡 Partial Hands-on/Operator Experience"
+    else:
+        badge = "🔴 No Direct Experience"
 
-        intent = detect_intent(user_input, st.session_state.last_recommendations)
+    overall   = expert.get("Overall Score", "N/A")
+    expert_name = expert.get("Name", "N/A")
 
-        # -------- FOLLOWUP HANDLING --------
-        if intent == "followup":
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
+    with st.expander(
+        f"#{index} — {expert_name} | ⭐ {overall}/10 | {badge}",
+        expanded=(index == 1)
+    ):
+        # ── Meta badges row ──
+        render_program_badge(expert_name)
+        render_experience_badge(expert_name)
 
-                    conversation_history = ""
-                    for msg in st.session_state.messages[-6:]:
-                        role = "Founder" if msg["role"] == "user" else "Assistant"
-                        content = msg.get("content", msg.get("summary", ""))
-                        conversation_history += f"{role}: {content}\n"
+        st.markdown("### 📊 Match Scorecard")
+        sc1, sc2, sc3, sc4 = st.columns(4)
 
-                    followup_prompt = f"""
-You are an AI expert-matching assistant helping an Indian founder find the right expert.
+        for col, key, label, max_val in [
+            (sc1, "Industry Match Score", "🏭 Industry Match", "3"),
+            (sc2, "Hands On Score", "🛠️ Hands-on/Operator Experience", "3"),
+            (sc3, "Expertise Score", "💼 Expertise", "2"),
+            (sc4, "Credibility Score", "🏅 Key Credentials", "2"),
+        ]:
+            with col:
+                raw = expert.get(key, "N/A")
+                parts = (
+                    raw.split("|")
+                    if isinstance(raw, str) and "|" in raw
+                    else [raw, ""]
+                )
+                st.metric(label, f"{parts[0].strip()} / {max_val}")
+                if len(parts) > 1:
+                    st.caption(parts[1].strip())
 
-Original search query: "{st.session_state.last_query}"
+        st.markdown("---")
 
-Previous conversation:
-{conversation_history}
+        st.markdown("**🎯 Core Area of Expertise**")
+        st.write(expert.get("Core Expertise", "Not available"))
 
-Current recommended experts (Tier 1 = Industry + Operator experience match, Tier 2 = Partial match):
-{json.dumps(st.session_state.last_recommendations, indent=2)}
+        st.markdown("**✅ Why Suitable**")
+        st.write(expert.get("Match Reason", ""))
 
-Founder's follow-up question: "{user_input}"
+        st.markdown("**💼 Relevant Experience**")
+        st.write(expert.get("Relevant Experience", ""))
 
-Instructions:
-- Answer the follow-up question conversationally and helpfully
-- Always mention which Tier an expert belongs to when referencing them
-- If asked to compare experts, compare them clearly with pros and cons
-- If asked to refine search, explain what kind of expert would be better
-- If asked about a specific expert, give detailed insights
-- If asked for a different expert type, suggest what to look for
-- Always lead with Industry Match and Operator Experience when comparing
-- Reference expert names, designations, qualifications and scores where relevant
-- Keep response clear, structured and founder-friendly
-- Do NOT return JSON — return a natural conversational response
-"""
-                    try:
-                        followup_response = call_ai(followup_prompt, max_tokens=1024)
-                        st.markdown(followup_response)
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "type": "text",
-                            "content": followup_response
-                        })
-                    except Exception as e:
-                        st.error(f"AI Error: {e}")
-
-        # -------- NEW SEARCH HANDLING --------
+        st.markdown("**🛠️ Hands-on/Operator Experience in Founder's Area**")
+        if hands_on == "Yes":
+            st.success(f"✅ Yes — Hands-on/Operator — {expert.get('Hands On Details', '')}")
+        elif hands_on == "Partial":
+            st.warning(f"⚠️ Partial Hands-on/Operator — {expert.get('Hands On Details', '')}")
         else:
-            with st.chat_message("assistant"):
-                with st.spinner("Searching for the best experts..."):
+            st.error(f"❌ No Hands-on/Operator Experience — {expert.get('Hands On Details', '')}")
 
-                    enriched_query = user_input
-                    if founder_doc_text:
-                        enriched_query = (
-                            f"{user_input}\n\n"
-                            f"Context from business document:\n{founder_doc_text[:1500]}"
-                        )
+        linkedin = linkedin_lookup.get(expert_name, "")
+        if linkedin and str(linkedin).strip() != "":
+            st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
 
-                    query_vec = model.encode([enriched_query])
-                    similarity = cosine_similarity(query_vec, filtered_vectors)
-                    filtered_df["score"] = similarity[0]
-                    candidates = filtered_df.sort_values(
-                        by=["score", "Name"],
-                        ascending=[False, True]
-                    ).head(20)
+# ------------------ DISPLAY FULL RESULTS ------------------
+def display_expert_results(ai_recommendations, source_df):
+    if not ai_recommendations:
+        return
 
-                    # Program context for prompt
-                    program_context = ""
-                    if selected_programs:
-                        program_context = (
-                            f"\nIMPORTANT: The search is filtered to experts "
-                            f"onboarded for program(s): {', '.join(selected_programs)}. "
-                            f"Only recommend experts from this filtered set.\n"
-                        )
+    tier1 = [m for m in ai_recommendations if m.get("Tier") == "1"]
+    tier2 = [m for m in ai_recommendations if m.get("Tier") == "2"]
 
-                    expert_info = ""
-                    for _, row in candidates.iterrows():
-                        doc_summary = (
-                            row["Doc Text"][:500]
-                            if row["Doc Text"] and len(row["Doc Text"]) > 50
-                            else "Not available"
-                        )
-                        program_info = row.get("Program", "")
-                        expert_info += f"""
+    if tier1:
+        st.markdown("""
+        ## 🏆 Tier 1 — Strong Matches
+        > These experts match **both the industry AND have hands-on operator experience**
+        in the founder's problem area.
+        """)
+        for i, expert in enumerate(tier1):
+            display_expert_card(expert, i + 1, "Tier 1", source_df)
+    else:
+        st.warning(
+            "⚠️ No Tier 1 matches found — no expert matched both industry "
+            "AND operator experience for this requirement."
+        )
+
+    if tier2:
+        st.markdown("---")
+        st.markdown("""
+        ## 🔍 Tier 2 — Partial Matches
+        > These experts match **either the industry OR have relevant experience**
+        but not both. They may still provide useful guidance.
+        """)
+        for i, expert in enumerate(tier2):
+            display_expert_card(expert, i + 1, "Tier 2", source_df)
+
+# ------------------ CORE SEARCH FUNCTION ------------------
+def run_search(query, source_df, source_vectors):
+    enriched_query = query
+    if founder_doc_text:
+        enriched_query = (
+            f"{query}\n\n"
+            f"Context from business document:\n{founder_doc_text[:1500]}"
+        )
+
+    query_vec = model.encode([enriched_query])
+    similarity = cosine_similarity(query_vec, source_vectors)
+    source_df = source_df.copy()
+    source_df["score"] = similarity[0]
+    candidates = source_df.sort_values(
+        by=["score", "Name"],
+        ascending=[False, True]
+    ).head(20)
+
+    expert_info = ""
+    for _, row in candidates.iterrows():
+        doc_summary = (
+            row["Doc Text"][:500]
+            if row["Doc Text"] and len(row["Doc Text"]) > 50
+            else "Not available"
+        )
+        expert_info += f"""
 Name: {row['Name']}
-Program(s): {program_info}
 Expertise: {row['Expertise']}
 Secondary Expertise: {row['Secondary Expertise']}
 Industry: {row['Industry']}
@@ -544,27 +478,26 @@ Document Summary: {doc_summary}
 ---
 """
 
-                    founder_context_section = ""
-                    if founder_doc_text:
-                        founder_context_section = f"""
+    founder_context_section = ""
+    if founder_doc_text:
+        founder_context_section = f"""
 Founder also uploaded a business document:
 {founder_doc_text[:1500]}
 """
 
-                    previous_context = ""
-                    if st.session_state.last_query:
-                        previous_context = f"""
+    previous_context = ""
+    if st.session_state.last_query and st.session_state.last_query != query:
+        previous_context = f"""
 Note: The founder previously searched for: "{st.session_state.last_query}"
 This is a new search. Treat it independently but keep previous context in mind.
 """
 
-                    prompt = f"""
+    prompt = f"""
 You are helping an Indian founder find the right expert.
 
 Founder's business brief and problem statement:
-"{user_input}"
+"{query}"
 
-{program_context}
 {founder_context_section}
 {previous_context}
 
@@ -593,6 +526,13 @@ Experts who meet at least ONE of the following:
   - Has operator experience in the problem area but from a different industry
   - Has strong relevant expertise that could still be useful to the founder
 
+MINIMUM RESULT GUARANTEE — MANDATORY:
+- You MUST return at least 1 expert total across both tiers
+- If no expert qualifies for Tier 1, place the best available expert(s) in Tier 2
+- If no strong matches exist, return the closest 1–2 experts as Tier 2 with an
+  honest Match Reason that clearly states the fit is partial or indirect
+- NEVER return an empty array under any circumstances
+
 SCORING (apply to all experts regardless of tier):
 - Industry Match: 3 points
 - Operator Experience: 3 points
@@ -613,7 +553,7 @@ STRICT RULES:
 
 Return strictly as a JSON array. Include ALL experts evaluated —
 Tier 1 first (1-5 experts), then Tier 2 (up to 5 experts).
-Total array can have between 2 and 10 objects.
+Total array must have at least 1 object and at most 10 objects.
 
 Format:
 [
@@ -639,82 +579,338 @@ Format:
 Return only the JSON array. No extra text, no markdown outside the array.
 """
 
-                    try:
-                        ai_raw = call_ai(prompt, max_tokens=3000)
+    ai_raw = call_ai(prompt, max_tokens=3000)
+    cleaned = re.sub(r"```json|```", "", ai_raw).strip()
 
-                        cleaned = re.sub(r"```json|```", "", ai_raw).strip()
-                        try:
-                            ai_recommendations = json.loads(cleaned)
-                        except json.JSONDecodeError:
-                            match_json = re.search(r'\[.*\]', cleaned, re.DOTALL)
-                            ai_recommendations = (
-                                json.loads(match_json.group()) if match_json else []
-                            )
+    try:
+        ai_recommendations = json.loads(cleaned)
+    except json.JSONDecodeError:
+        match_json = re.search(r'\[.*\]', cleaned, re.DOTALL)
+        ai_recommendations = (
+            json.loads(match_json.group()) if match_json else []
+        )
 
-                        if ai_recommendations:
-                            st.session_state.last_recommendations = ai_recommendations
-                            st.session_state.last_query = user_input
+    # ── PYTHON-LEVEL FALLBACK ──
+    if not ai_recommendations:
+        for _, row in candidates.head(2).iterrows():
+            ai_recommendations.append({
+                "Tier": "2",
+                "Name": row.get("Name", "Unknown"),
+                "Overall Score": "4",
+                "Industry Match Score": "1 | Closest available match — no strong industry alignment found",
+                "Hands On Score": "1 | Limited operator experience confirmed for this requirement",
+                "Expertise Score": "1 | Some relevant expertise may apply",
+                "Credibility Score": "1 | Profile available for review",
+                "Core Expertise": row.get("Expertise", "Not specified"),
+                "Match Reason": (
+                    "No strong match found for this requirement. "
+                    "This expert is the closest available in the network based on semantic similarity. "
+                    "Suitability should be verified manually before outreach."
+                ),
+                "Relevant Experience": row.get("Description", "")[:300],
+                "Current Designation": row.get("Current Designation", ""),
+                "Current Organization": row.get("Current Organization", ""),
+                "Qualification": row.get("Qualification", ""),
+                "Hands On Experience": "No",
+                "Hands On Details": (
+                    "Hands-on fit for this specific requirement could not be confirmed. "
+                    "Please review the full profile before proceeding."
+                )
+            })
 
-                            tier1_count = len(
-                                [m for m in ai_recommendations if m.get("Tier") == "1"]
-                            )
-                            tier2_count = len(
-                                [m for m in ai_recommendations if m.get("Tier") == "2"]
-                            )
+    return ai_recommendations
 
-                            program_note = ""
-                            if selected_programs:
-                                program_note = (
-                                    f" *(filtered to: {', '.join(selected_programs)})*"
-                                )
+# ------------------ RENDER CHAT HISTORY ------------------
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        if message.get("type") == "recommendations":
+            st.markdown(message["summary"])
+            display_expert_results(message["recommendations"], df)
+        elif message.get("type") == "expert_score":
+            st.markdown(message["content"])
+        elif message.get("type") == "retry_prompt":
+            st.markdown(message["content"])
+            if message == st.session_state.messages[-1] and st.session_state.pending_retry:
+                col_yes, col_no, col_gap = st.columns([1, 1, 4])
+                with col_yes:
+                    if st.button("✅ Yes, retry", key="retry_yes"):
+                        retry_q = st.session_state.retry_query
+                        st.session_state.pending_retry = False
+                        st.session_state.messages.append({"role": "user", "content": "Yes"})
+                        with st.spinner("Retrying your search..."):
+                            try:
+                                retry_results = run_search(retry_q, df, vectors)
+                                st.session_state.last_recommendations = retry_results
+                                st.session_state.last_query = retry_q
+                                t1 = len([r for r in retry_results if r.get("Tier") == "1"])
+                                t2 = len([r for r in retry_results if r.get("Tier") == "2"])
+                                save_to_history(retry_q, t1, t2)
+                                retry_summary = f"Found **{t1} Tier 1 expert(s)** and **{t2} Tier 2 expert(s)**."
+                                st.session_state.messages.append({
+                                    "role": "assistant", "type": "recommendations",
+                                    "summary": retry_summary, "recommendations": retry_results,
+                                    "content": retry_summary
+                                })
+                            except Exception as e:
+                                st.session_state.messages.append({
+                                    "role": "assistant", "type": "text",
+                                    "content": f"Sorry, encountered an error: {e}"
+                                })
+                        st.rerun()
+                with col_no:
+                    if st.button("❌ No, cancel", key="retry_no"):
+                        st.session_state.pending_retry = False
+                        st.session_state.retry_query = ""
+                        st.session_state.messages.append({
+                            "role": "assistant", "type": "text",
+                            "content": "No problem! Feel free to try a new search anytime."
+                        })
+                        st.rerun()
+        else:
+            st.markdown(message["content"])
 
-                            summary = (
-                                f"Found **{tier1_count} Tier 1 expert(s)** "
-                                f"(Industry + Operator experience match) and "
-                                f"**{tier2_count} Tier 2 expert(s)** (partial match)"
-                                f"{program_note}.\n\n"
-                                f"You can ask me to **compare any two experts**, "
-                                f"**tell me more about a specific expert**, "
-                                f"**refine the search**, or **start a new search** anytime."
-                            )
-                            st.markdown(summary)
-                            display_expert_results(ai_recommendations, filtered_df)
+# ------------------ INLINE PROMPT HISTORY PANEL ------------------
+# Shows last 10 prompts as clickable chips above the chat input.
+# Clicking a chip sets _rerun_query and reruns — no extra API calls
+# until the query is actually processed below. Zero perf impact.
 
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "type": "recommendations",
-                                "summary": summary,
-                                "recommendations": ai_recommendations,
-                                "content": summary
-                            })
-                        else:
-                            fallback = (
-                                "I could not find strong matches. "
-                                "Could you describe your business problem in more detail?"
-                            )
-                            st.markdown(fallback)
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "type": "text",
-                                "content": fallback
-                            })
+if st.session_state.get("search_history"):
+    recent_history = list(reversed(st.session_state.search_history))[:10]
 
-                    except Exception as e:
-                        st.error(f"AI Error: {e}")
+    st.markdown(
+        "<div style='margin-bottom:4px;font-size:13px;color:#888;font-weight:500;'>"
+        "🕘 Recent searches — click to re-run</div>",
+        unsafe_allow_html=True
+    )
 
-        # -------- UPLOADED EXPERT PROFILE SCORING --------
-        if expert_profile_text and st.session_state.last_recommendations:
-            with st.chat_message("assistant"):
-                with st.spinner("Scoring uploaded expert profile..."):
+    # Render chips in rows of 2
+    for row_start in range(0, len(recent_history), 2):
+        row_items = recent_history[row_start:row_start + 2]
+        cols = st.columns(len(row_items))
+        for col, item in zip(cols, row_items):
+            with col:
+                label = item["query"][:55] + ("…" if len(item["query"]) > 55 else "")
+                meta  = f"🏆{item['tier1']} · 🔍{item['tier2']}  |  {item['timestamp']}"
+                # Chip button — full width, styled via markdown caption
+                if st.button(
+                    f"↩ {label}",
+                    key=f"chip_{row_start}_{row_items.index(item)}",
+                    use_container_width=True,
+                    help=item["query"]           # full query shown on hover
+                ):
+                    st.session_state._rerun_query = item["query"]
+                    st.rerun()
+                st.caption(meta)
 
-                    founder_context_section = ""
-                    if founder_doc_text:
-                        founder_context_section = (
-                            f"Founder uploaded a business document:\n"
-                            f"{founder_doc_text[:1500]}"
+    st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
+
+# ------------------ HANDLE RE-RUN FROM HISTORY ------------------
+if st.session_state.get("_rerun_query"):
+    user_input = st.session_state._rerun_query
+    st.session_state._rerun_query = None
+else:
+    user_input = None
+
+# ------------------ USER INPUT ------------------
+chat_input = st.chat_input(
+    "Describe your business, ask a follow-up, or start a new search..."
+)
+if chat_input:
+    user_input = chat_input
+
+# ------------------ PROCESS INPUT ------------------
+if user_input:
+
+    with st.chat_message("user"):
+        st.markdown(user_input)
+    st.session_state.messages.append({"role": "user", "content": user_input})
+
+    intent = detect_intent(user_input, st.session_state.last_recommendations)
+
+    # -------- FOLLOWUP HANDLING --------
+    if intent == "followup":
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                conversation_history = ""
+                for msg in st.session_state.messages[-6:]:
+                    role = "Founder" if msg["role"] == "user" else "Assistant"
+                    content = msg.get("content", msg.get("summary", ""))
+                    conversation_history += f"{role}: {content}\n"
+
+                followup_prompt = f"""
+You are an AI expert-matching assistant helping an Indian founder find the right expert.
+
+Original search query: "{st.session_state.last_query}"
+
+Previous conversation:
+{conversation_history}
+
+Current recommended experts (Tier 1 = Industry + Operator experience match, Tier 2 = Partial match):
+{json.dumps(st.session_state.last_recommendations, indent=2)}
+
+Founder's follow-up question: "{user_input}"
+
+Instructions:
+- Answer the follow-up question conversationally and helpfully
+- Always mention which Tier an expert belongs to when referencing them
+- If asked to compare experts, compare them clearly with pros and cons
+- If asked to refine search, explain what kind of expert would be better
+- If asked about a specific expert, give detailed insights
+- If asked for a different expert type, suggest what to look for
+- Always lead with Industry Match and Operator Experience when comparing
+- Reference expert names, designations, qualifications and scores where relevant
+- Keep response clear, structured and founder-friendly
+- Do NOT return JSON — return a natural conversational response
+"""
+                try:
+                    followup_response = call_ai(followup_prompt, max_tokens=1024)
+                    st.markdown(followup_response)
+                    st.session_state.messages.append({
+                        "role": "assistant", "type": "text", "content": followup_response
+                    })
+                except Exception as e:
+                    st.error(f"AI Error: {e}")
+
+    # -------- NEW SEARCH HANDLING --------
+    else:
+        with st.chat_message("assistant"):
+            with st.spinner("Searching for the best experts..."):
+                try:
+                    ai_recommendations = run_search(user_input, df, vectors)
+
+                    if not ai_recommendations:
+                        st.session_state.pending_retry = True
+                        st.session_state.retry_query = user_input
+                        retry_msg = (
+                            "🔍 Looks like I encountered a glitch and couldn't retrieve results. "
+                            "Shall I try again?\n\n**Type Yes or No, or use the buttons below.**"
                         )
+                        st.markdown(retry_msg)
+                        col_yes, col_no, col_gap = st.columns([1, 1, 4])
+                        with col_yes:
+                            if st.button("✅ Yes, retry", key="inline_retry_yes"):
+                                retry_q = st.session_state.retry_query
+                                st.session_state.pending_retry = False
+                                st.session_state.messages.append({"role": "user", "content": "Yes"})
+                                with st.spinner("Retrying..."):
+                                    try:
+                                        retry_results = run_search(retry_q, df, vectors)
+                                        st.session_state.last_recommendations = retry_results
+                                        st.session_state.last_query = retry_q
+                                        t1 = len([r for r in retry_results if r.get("Tier") == "1"])
+                                        t2 = len([r for r in retry_results if r.get("Tier") == "2"])
+                                        save_to_history(retry_q, t1, t2)
+                                        retry_summary = f"Found **{t1} Tier 1 expert(s)** and **{t2} Tier 2 expert(s)**."
+                                        st.session_state.messages.append({
+                                            "role": "assistant", "type": "recommendations",
+                                            "summary": retry_summary, "recommendations": retry_results,
+                                            "content": retry_summary
+                                        })
+                                    except Exception as e:
+                                        st.session_state.messages.append({
+                                            "role": "assistant", "type": "text",
+                                            "content": f"Sorry, encountered an error: {e}"
+                                        })
+                                st.rerun()
+                        with col_no:
+                            if st.button("❌ No, cancel", key="inline_retry_no"):
+                                st.session_state.pending_retry = False
+                                st.session_state.retry_query = ""
+                                st.session_state.messages.append({
+                                    "role": "assistant", "type": "text",
+                                    "content": "No problem! Feel free to try a new search anytime."
+                                })
+                                st.rerun()
+                        st.session_state.messages.append({
+                            "role": "assistant", "type": "retry_prompt", "content": retry_msg
+                        })
 
-                    scoring_prompt = f"""
+                    else:
+                        st.session_state.last_recommendations = ai_recommendations
+                        st.session_state.last_query = user_input
+                        st.session_state.pending_retry = False
+
+                        tier1_count = len([m for m in ai_recommendations if m.get("Tier") == "1"])
+                        tier2_count = len([m for m in ai_recommendations if m.get("Tier") == "2"])
+
+                        save_to_history(user_input, tier1_count, tier2_count)
+
+                        summary = (
+                            f"Found **{tier1_count} Tier 1 expert(s)** "
+                            f"(Industry + Operator experience match) and "
+                            f"**{tier2_count} Tier 2 expert(s)** (partial match).\n\n"
+                            f"You can ask me to **compare any two experts**, "
+                            f"**tell me more about a specific expert**, "
+                            f"**refine the search**, or **start a new search** anytime."
+                        )
+                        st.markdown(summary)
+                        display_expert_results(ai_recommendations, df)
+                        st.session_state.messages.append({
+                            "role": "assistant", "type": "recommendations",
+                            "summary": summary, "recommendations": ai_recommendations,
+                            "content": summary
+                        })
+
+                except Exception as e:
+                    st.session_state.pending_retry = True
+                    st.session_state.retry_query = user_input
+                    retry_msg = (
+                        "🔍 Looks like I encountered a glitch and couldn't retrieve results. "
+                        "Shall I try again?\n\n**Type Yes or No, or use the buttons below.**"
+                    )
+                    st.markdown(retry_msg)
+                    col_yes, col_no, col_gap = st.columns([1, 1, 4])
+                    with col_yes:
+                        if st.button("✅ Yes, retry", key="err_retry_yes"):
+                            retry_q = st.session_state.retry_query
+                            st.session_state.pending_retry = False
+                            st.session_state.messages.append({"role": "user", "content": "Yes"})
+                            with st.spinner("Retrying..."):
+                                try:
+                                    retry_results = run_search(retry_q, df, vectors)
+                                    st.session_state.last_recommendations = retry_results
+                                    st.session_state.last_query = retry_q
+                                    t1 = len([r for r in retry_results if r.get("Tier") == "1"])
+                                    t2 = len([r for r in retry_results if r.get("Tier") == "2"])
+                                    save_to_history(retry_q, t1, t2)
+                                    retry_summary = f"Found **{t1} Tier 1 expert(s)** and **{t2} Tier 2 expert(s)**."
+                                    st.session_state.messages.append({
+                                        "role": "assistant", "type": "recommendations",
+                                        "summary": retry_summary, "recommendations": retry_results,
+                                        "content": retry_summary
+                                    })
+                                except Exception as e:
+                                    st.session_state.messages.append({
+                                        "role": "assistant", "type": "text",
+                                        "content": f"Sorry, encountered an error: {e}"
+                                    })
+                            st.rerun()
+                    with col_no:
+                        if st.button("❌ No, cancel", key="err_retry_no"):
+                            st.session_state.pending_retry = False
+                            st.session_state.retry_query = ""
+                            st.session_state.messages.append({
+                                "role": "assistant", "type": "text",
+                                "content": "No problem! Feel free to try a new search anytime."
+                            })
+                            st.rerun()
+                    st.session_state.messages.append({
+                        "role": "assistant", "type": "retry_prompt", "content": retry_msg
+                    })
+
+    # -------- UPLOADED EXPERT PROFILE SCORING --------
+    if expert_profile_text and st.session_state.last_recommendations:
+        with st.chat_message("assistant"):
+            with st.spinner("Scoring uploaded expert profile..."):
+
+                founder_context_section = ""
+                if founder_doc_text:
+                    founder_context_section = (
+                        f"Founder uploaded a business document:\n"
+                        f"{founder_doc_text[:1500]}"
+                    )
+
+                scoring_prompt = f"""
 A founder is looking for an expert with this requirement:
 "{st.session_state.last_query}"
 
@@ -757,381 +953,102 @@ Return strictly as a JSON object:
 
 Return only the JSON object. No extra text.
 """
+                try:
+                    score_raw = call_ai(scoring_prompt, max_tokens=1024)
+                    score_cleaned = re.sub(r"```json|```", "", score_raw).strip()
+
                     try:
-                        score_raw = call_ai(scoring_prompt, max_tokens=1024)
-                        score_cleaned = re.sub(r"```json|```", "", score_raw).strip()
+                        score_result = json.loads(score_cleaned)
+                    except json.JSONDecodeError:
+                        match_score = re.search(r'\{.*\}', score_cleaned, re.DOTALL)
+                        score_result = (
+                            json.loads(match_score.group()) if match_score else {}
+                        )
 
-                        try:
-                            score_result = json.loads(score_cleaned)
-                        except json.JSONDecodeError:
-                            match_score = re.search(r'\{.*\}', score_cleaned, re.DOTALL)
-                            score_result = (
-                                json.loads(match_score.group()) if match_score else {}
-                            )
+                    if score_result:
+                        expert_name = score_result.get("Uploaded Expert Name", "Uploaded Expert")
+                        score_val   = score_result.get("Overall Score", "N/A")
+                        hands_on_val = score_result.get("Hands On Experience", "").strip()
+                        tier_val    = score_result.get("Tier", "2")
+                        tier_reason = score_result.get("Tier Reason", "")
 
-                        if score_result:
-                            expert_name = score_result.get(
-                                "Uploaded Expert Name", "Uploaded Expert"
-                            )
-                            score_val = score_result.get("Overall Score", "N/A")
-                            hands_on_val = score_result.get(
-                                "Hands On Experience", ""
-                            ).strip()
-                            tier_val = score_result.get("Tier", "2")
-                            tier_reason = score_result.get("Tier Reason", "")
+                        tier_color = "🏆" if tier_val == "1" else "🔍"
+                        st.markdown(
+                            f"---\n#### {tier_color} Uploaded Expert — {expert_name} | Tier {tier_val}"
+                        )
+                        if tier_val == "1":
+                            st.success(f"✅ Tier 1 — {tier_reason}")
+                        else:
+                            st.warning(f"⚠️ Tier 2 — {tier_reason}")
 
-                            tier_color = "🏆" if tier_val == "1" else "🔍"
-                            st.markdown(
-                                f"---\n#### {tier_color} Uploaded Expert — "
-                                f"{expert_name} | Tier {tier_val}"
-                            )
+                        # Program + experience badges for uploaded expert
+                        render_program_badge(expert_name)
+                        render_experience_badge(expert_name)
 
-                            if tier_val == "1":
-                                st.success(f"✅ Tier 1 — {tier_reason}")
-                            else:
-                                st.warning(f"⚠️ Tier 2 — {tier_reason}")
-
-                            st.markdown("### 📊 Match Scorecard")
-                            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-
-                            with sc1:
-                                st.metric("⭐ Overall", f"{score_val} / 10")
-
-                            for col, key, label, max_val in [
-                                (sc2, "Industry Match Score", "🏭 Industry", "3"),
-                                (sc3, "Hands On Score", "🛠️ Hands-on/Operator Exp", "3"),
-                                (sc4, "Expertise Score", "💼 Expertise", "2"),
-                                (sc5, "Credibility Score", "🏅 Key Credentials", "2"),
-                            ]:
-                                with col:
-                                    raw = score_result.get(key, "N/A")
-                                    parts = (
-                                        raw.split("|")
-                                        if isinstance(raw, str) and "|" in raw
-                                        else [raw, ""]
-                                    )
-                                    st.metric(label, f"{parts[0].strip()} / {max_val}")
-                                    if len(parts) > 1:
-                                        st.caption(parts[1].strip())
-
-                            st.markdown("---")
-
-                            st.markdown("**🛠️ Hands-on/Operator Experience**")
-                            if hands_on_val == "Yes":
-                                st.success(
-                                    f"🟢 Yes — Hands-on/Operator — {score_result.get('Hands On Details', '')}"
+                        st.markdown("### 📊 Match Scorecard")
+                        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                        with sc1:
+                            st.metric("⭐ Overall", f"{score_val} / 10")
+                        for col, key, label, max_val in [
+                            (sc2, "Industry Match Score", "🏭 Industry", "3"),
+                            (sc3, "Hands On Score", "🛠️ Hands-on/Operator Exp", "3"),
+                            (sc4, "Expertise Score", "💼 Expertise", "2"),
+                            (sc5, "Credibility Score", "🏅 Key Credentials", "2"),
+                        ]:
+                            with col:
+                                raw = score_result.get(key, "N/A")
+                                parts = (
+                                    raw.split("|")
+                                    if isinstance(raw, str) and "|" in raw
+                                    else [raw, ""]
                                 )
-                            elif hands_on_val == "Partial":
-                                st.warning(
-                                    f"🟡 Partial Hands-on/Operator — "
-                                    f"{score_result.get('Hands On Details', '')}"
-                                )
-                            else:
-                                st.error(
-                                    f"🔴 No Hands-on/Operator Experience — {score_result.get('Hands On Details', '')}"
-                                )
+                                st.metric(label, f"{parts[0].strip()} / {max_val}")
+                                if len(parts) > 1:
+                                    st.caption(parts[1].strip())
 
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.markdown("**📊 Rank vs Tier 1**")
-                                st.write(score_result.get("Rank vs Tier 1", "N/A"))
-                            with col2:
-                                st.markdown("**📊 Rank vs Tier 2**")
-                                st.write(score_result.get("Rank vs Tier 2", "N/A"))
+                        st.markdown("---")
+                        st.markdown("**🛠️ Hands-on/Operator Experience**")
+                        if hands_on_val == "Yes":
+                            st.success(f"🟢 Yes — Hands-on/Operator — {score_result.get('Hands On Details', '')}")
+                        elif hands_on_val == "Partial":
+                            st.warning(f"🟡 Partial Hands-on/Operator — {score_result.get('Hands On Details', '')}")
+                        else:
+                            st.error(f"🔴 No Hands-on/Operator Experience — {score_result.get('Hands On Details', '')}")
 
-                            col3, col4 = st.columns(2)
-                            with col3:
-                                st.markdown("**✅ Key Strengths**")
-                                st.write(score_result.get("Key Strengths", "N/A"))
-                            with col4:
-                                st.markdown("**⚠️ Gaps**")
-                                st.write(score_result.get("Gaps", "N/A"))
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("**📊 Rank vs Tier 1**")
+                            st.write(score_result.get("Rank vs Tier 1", "N/A"))
+                        with col2:
+                            st.markdown("**📊 Rank vs Tier 2**")
+                            st.write(score_result.get("Rank vs Tier 2", "N/A"))
 
-                            st.markdown("**📝 Match Summary**")
-                            st.write(score_result.get("Match Summary", "N/A"))
+                        col3, col4 = st.columns(2)
+                        with col3:
+                            st.markdown("**✅ Key Strengths**")
+                            st.write(score_result.get("Key Strengths", "N/A"))
+                        with col4:
+                            st.markdown("**⚠️ Gaps**")
+                            st.write(score_result.get("Gaps", "N/A"))
 
-                            score_content = (
+                        st.markdown("**📝 Match Summary**")
+                        st.write(score_result.get("Match Summary", "N/A"))
+
+                        st.session_state.messages.append({
+                            "role": "assistant", "type": "expert_score",
+                            "content": (
                                 f"Uploaded expert **{expert_name}** is "
                                 f"**Tier {tier_val}** with score **{score_val}/10**. "
                                 f"{tier_reason}"
                             )
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "type": "expert_score",
-                                "content": score_content
-                            })
+                        })
 
-                    except Exception as e:
-                        st.error(f"Expert Scoring Error: {e}")
+                except Exception as e:
+                    st.error(f"Expert Scoring Error: {e}")
 
-        elif expert_profile_text and not st.session_state.last_recommendations:
-            with st.chat_message("assistant"):
-                st.info(
-                    "💡 Expert profile uploaded. "
-                    "Run a search first to get match analysis."
-                )
-
-
-# ============================================================
-# TAB 2 — NETWORK INSIGHTS
-# ============================================================
-with tab_insights:
-
-    st.markdown("## 📊 Network Insights")
-    st.markdown("An overview of the expert network across programs, experience, expertise, and sectors.")
-    st.markdown("---")
-
-    # ── Insight filter by program ──
-    insight_programs = st.multiselect(
-        "Filter insights by Program (leave empty for full network view)",
-        options=all_programs,
-        default=[],
-        key="insight_program_filter"
-    )
-
-    if insight_programs:
-        ins_mask = df["Program"].apply(
-            lambda x: any(
-                prog.strip() in [p.strip() for p in str(x).split(",")]
-                for prog in insight_programs
+    elif expert_profile_text and not st.session_state.last_recommendations:
+        with st.chat_message("assistant"):
+            st.info(
+                "💡 Expert profile uploaded. "
+                "Run a search first to get match analysis."
             )
-        )
-        ins_df = df[ins_mask].reset_index(drop=True)
-    else:
-        ins_df = df.copy()
-
-    total = len(ins_df)
-    prog_label = ", ".join(insight_programs) if insight_programs else "All Programs"
-    st.markdown(f"**Showing insights for: {prog_label} — {total} expert(s)**")
-    st.markdown("---")
-
-    # ── Summary metrics ──
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("👥 Total Experts", total)
-    with m2:
-        num_programs = len(all_programs)
-        st.metric("🎯 Total Programs", num_programs)
-    with m3:
-        unique_industries = ins_df["Industry"].replace("", pd.NA).dropna().nunique()
-        st.metric("🏭 Unique Industries", unique_industries)
-    with m4:
-        unique_expertise = ins_df["Expertise"].replace("", pd.NA).dropna().nunique()
-        st.metric("💼 Unique Expertise Areas", unique_expertise)
-
-    st.markdown("---")
-
-    # ── Chart 1: Mentors by Program ──
-    st.subheader("1️⃣  Mentors by Program")
-
-    program_rows = []
-    for _, row in ins_df.iterrows():
-        progs = [p.strip() for p in str(row["Program"]).split(",") if p.strip()]
-        for prog in progs:
-            program_rows.append({"Program": prog, "Name": row["Name"]})
-
-    if program_rows:
-        prog_df = pd.DataFrame(program_rows)
-        prog_count = prog_df.groupby("Program").size().reset_index(name="Count")
-        prog_count = prog_count.sort_values("Count", ascending=False)
-
-        fig1 = px.bar(
-            prog_count,
-            x="Program",
-            y="Count",
-            text="Count",
-            color="Count",
-            color_continuous_scale="Blues",
-            title="Number of Experts per Program"
-        )
-        fig1.update_traces(textposition="outside")
-        fig1.update_layout(
-            showlegend=False,
-            coloraxis_showscale=False,
-            xaxis_title="Program",
-            yaxis_title="Number of Experts",
-            plot_bgcolor="white"
-        )
-        st.plotly_chart(fig1, use_container_width=True)
-
-        with st.expander("📋 View Program-wise Expert List"):
-            for prog in prog_count["Program"].tolist():
-                names = prog_df[prog_df["Program"] == prog]["Name"].tolist()
-                st.markdown(f"**{prog}** ({len(names)} experts)")
-                st.write(", ".join(names))
-    else:
-        st.info("No Program data available. Add a 'Program' column to your Excel file.")
-
-    st.markdown("---")
-
-    # ── Chart 2: Mentors by Experience ──
-    st.subheader("2️⃣  Mentors by Years of Experience")
-
-    if "Years of Experience" in ins_df.columns and ins_df["Years of Experience"].replace("", pd.NA).dropna().shape[0] > 0:
-        exp_df = ins_df[ins_df["Years of Experience"].str.strip() != ""].copy()
-
-        def bucket_experience(val):
-            try:
-                yrs = int(str(val).strip().split()[0])
-                if yrs < 5:
-                    return "0–5 years"
-                elif yrs < 10:
-                    return "5–10 years"
-                elif yrs < 15:
-                    return "10–15 years"
-                elif yrs < 20:
-                    return "15–20 years"
-                elif yrs < 25:
-                    return "20–25 years"
-                else:
-                    return "25+ years"
-            except Exception:
-                return "Not Specified"
-
-        exp_df["Exp Bucket"] = exp_df["Years of Experience"].apply(bucket_experience)
-        exp_count = exp_df["Exp Bucket"].value_counts().reset_index()
-        exp_count.columns = ["Experience Band", "Count"]
-
-        order = ["0–5 years", "5–10 years", "10–15 years", "15–20 years", "20–25 years", "25+ years", "Not Specified"]
-        exp_count["sort_key"] = exp_count["Experience Band"].apply(
-            lambda x: order.index(x) if x in order else 99
-        )
-        exp_count = exp_count.sort_values("sort_key").drop(columns="sort_key")
-
-        fig2 = px.pie(
-            exp_count,
-            names="Experience Band",
-            values="Count",
-            title="Mentor Distribution by Years of Experience",
-            color_discrete_sequence=px.colors.sequential.Blues_r
-        )
-        fig2.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig2, use_container_width=True)
-    else:
-        # Fallback: use Description length as proxy
-        st.info(
-            "💡 No 'Years of Experience' column found. "
-            "Add this column to your Excel for accurate experience insights. "
-            "Showing a placeholder chart."
-        )
-        placeholder_data = pd.DataFrame({
-            "Experience Band": ["0–5 years", "5–10 years", "10–15 years", "15–20 years", "20–25 years", "25+ years"],
-            "Count": [0, 0, 0, 0, 0, 0]
-        })
-        st.dataframe(placeholder_data)
-
-    st.markdown("---")
-
-    # ── Chart 3: Mentors by Expertise ──
-    st.subheader("3️⃣  Mentors by Expertise")
-
-    expertise_rows = []
-    for _, row in ins_df.iterrows():
-        for col in ["Expertise", "Secondary Expertise"]:
-            val = str(row.get(col, "")).strip()
-            if val and val != "nan":
-                for item in val.split(","):
-                    item = item.strip()
-                    if item:
-                        expertise_rows.append(item)
-
-    if expertise_rows:
-        exp_series = pd.Series(expertise_rows)
-        top_expertise = exp_series.value_counts().head(20).reset_index()
-        top_expertise.columns = ["Expertise Area", "Count"]
-
-        fig3 = px.bar(
-            top_expertise,
-            x="Count",
-            y="Expertise Area",
-            orientation="h",
-            text="Count",
-            color="Count",
-            color_continuous_scale="Teal",
-            title="Top 20 Expertise Areas in the Network"
-        )
-        fig3.update_traces(textposition="outside")
-        fig3.update_layout(
-            showlegend=False,
-            coloraxis_showscale=False,
-            yaxis=dict(autorange="reversed"),
-            xaxis_title="Number of Experts",
-            yaxis_title="",
-            plot_bgcolor="white",
-            height=600
-        )
-        st.plotly_chart(fig3, use_container_width=True)
-    else:
-        st.info("No expertise data available.")
-
-    st.markdown("---")
-
-    # ── Chart 4: Mentors by Sector ──
-    st.subheader("4️⃣  Mentors by Sector")
-
-    sector_col = "Sector" if "Sector" in ins_df.columns else "Industry"
-
-    sector_rows = []
-    for _, row in ins_df.iterrows():
-        for col in [sector_col, "Secondary Industry"]:
-            val = str(row.get(col, "")).strip()
-            if val and val != "nan":
-                for item in val.split(","):
-                    item = item.strip()
-                    if item:
-                        sector_rows.append(item)
-
-    if sector_rows:
-        sec_series = pd.Series(sector_rows)
-        top_sectors = sec_series.value_counts().head(20).reset_index()
-        top_sectors.columns = ["Sector", "Count"]
-
-        fig4 = px.treemap(
-            top_sectors,
-            path=["Sector"],
-            values="Count",
-            title="Mentor Coverage by Sector (Treemap)",
-            color="Count",
-            color_continuous_scale="Blues"
-        )
-        fig4.update_layout(height=500)
-        st.plotly_chart(fig4, use_container_width=True)
-
-        # Also show as horizontal bar
-        fig4b = px.bar(
-            top_sectors,
-            x="Count",
-            y="Sector",
-            orientation="h",
-            text="Count",
-            color="Count",
-            color_continuous_scale="Blues",
-            title="Top 20 Sectors — Mentor Count"
-        )
-        fig4b.update_traces(textposition="outside")
-        fig4b.update_layout(
-            showlegend=False,
-            coloraxis_showscale=False,
-            yaxis=dict(autorange="reversed"),
-            xaxis_title="Number of Experts",
-            yaxis_title="",
-            plot_bgcolor="white",
-            height=600
-        )
-        st.plotly_chart(fig4b, use_container_width=True)
-    else:
-        st.info("No sector/industry data available.")
-
-    st.markdown("---")
-
-    # ── Full Expert Table ──
-    with st.expander("📋 View Full Expert Directory"):
-        display_cols = [c for c in [
-            "Name", "Program", "Expertise", "Industry",
-            "Current Designation", "Current Organization",
-            "Years of Experience", "Sector", "LinkedIn"
-        ] if c in ins_df.columns]
-        st.dataframe(
-            ins_df[display_cols].replace("", "—"),
-            use_container_width=True
-        )
