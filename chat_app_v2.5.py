@@ -77,6 +77,46 @@ if st.sidebar.button("🗑️ Clear Chat & History"):
     st.session_state.search_history = []
     st.rerun()
 
+# ------------------ PROGRAM FILTER ------------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 Filter by Program")
+st.sidebar.caption("Leave empty to search all mentors.")
+
+# Build program list dynamically from Excel
+_all_programs = sorted(set(
+    p.strip()
+    for val in df["Program"]
+    for p in str(val).split(",")
+    if p.strip() and p.strip().lower() not in ("nan", "none", "")
+))
+
+selected_programs = st.sidebar.multiselect(
+    "Program(s)",
+    options=_all_programs,
+    default=[],
+    key="program_filter",
+    placeholder="All programs"
+)
+
+# Apply filter — derive filtered_df and filtered_vectors used in all searches
+if selected_programs:
+    _prog_mask = df["Program"].apply(
+        lambda x: any(
+            sel.strip() in [p.strip() for p in str(x).split(",")]
+            for sel in selected_programs
+        )
+    )
+    filtered_df = df[_prog_mask].reset_index(drop=True)
+    filtered_vectors = get_vectors(filtered_df["combined"].tolist())
+    st.sidebar.info(
+        f"🔎 Searching **{len(filtered_df)}** mentor(s) in: "
+        f"{', '.join(selected_programs)}"
+    )
+else:
+    filtered_df = df
+    filtered_vectors = vectors
+    st.sidebar.caption(f"🔎 Searching all **{len(df)}** mentors")
+
 # ------------------ SIDEBAR: PROMPT HISTORY (compact) ------------------
 # Sidebar shows count only — full history shown inline above chat input
 st.sidebar.markdown("---")
@@ -639,7 +679,7 @@ for message in st.session_state.messages:
                         st.session_state.messages.append({"role": "user", "content": "Yes"})
                         with st.spinner("Retrying your search..."):
                             try:
-                                retry_results = run_search(retry_q, df, vectors)
+                                retry_results = run_search(retry_q, filtered_df, filtered_vectors)
                                 st.session_state.last_recommendations = retry_results
                                 st.session_state.last_query = retry_q
                                 t1 = len([r for r in retry_results if r.get("Tier") == "1"])
@@ -776,7 +816,7 @@ Instructions:
         with st.chat_message("assistant"):
             with st.spinner("Searching for the best experts..."):
                 try:
-                    ai_recommendations = run_search(user_input, df, vectors)
+                    ai_recommendations = run_search(user_input, filtered_df, filtered_vectors)
 
                     if not ai_recommendations:
                         st.session_state.pending_retry = True
@@ -794,7 +834,7 @@ Instructions:
                                 st.session_state.messages.append({"role": "user", "content": "Yes"})
                                 with st.spinner("Retrying..."):
                                     try:
-                                        retry_results = run_search(retry_q, df, vectors)
+                                        retry_results = run_search(retry_q, filtered_df, filtered_vectors)
                                         st.session_state.last_recommendations = retry_results
                                         st.session_state.last_query = retry_q
                                         t1 = len([r for r in retry_results if r.get("Tier") == "1"])
@@ -835,10 +875,15 @@ Instructions:
 
                         save_to_history(user_input, tier1_count, tier2_count)
 
+                        prog_note = (
+                            f"  *(filtered to: {', '.join(selected_programs)})*"
+                            if selected_programs else ""
+                        )
                         summary = (
                             f"Found **{tier1_count} Tier 1 expert(s)** "
                             f"(Industry + Operator experience match) and "
-                            f"**{tier2_count} Tier 2 expert(s)** (partial match).\n\n"
+                            f"**{tier2_count} Tier 2 expert(s)** (partial match)"
+                            f"{prog_note}.\n\n"
                             f"You can ask me to **compare any two experts**, "
                             f"**tell me more about a specific expert**, "
                             f"**refine the search**, or **start a new search** anytime."
@@ -867,7 +912,7 @@ Instructions:
                             st.session_state.messages.append({"role": "user", "content": "Yes"})
                             with st.spinner("Retrying..."):
                                 try:
-                                    retry_results = run_search(retry_q, df, vectors)
+                                    retry_results = run_search(retry_q, filtered_df, filtered_vectors)
                                     st.session_state.last_recommendations = retry_results
                                     st.session_state.last_query = retry_q
                                     t1 = len([r for r in retry_results if r.get("Tier") == "1"])
