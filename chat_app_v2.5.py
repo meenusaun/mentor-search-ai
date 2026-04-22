@@ -867,13 +867,13 @@ Instructions:
                             f"**tell me more about a specific expert**, "
                             f"**refine the search**, or **start a new search** anytime."
                         )
-                        st.markdown(summary)
-                        display_expert_results(ai_recommendations, df)
                         st.session_state.messages.append({
                             "role": "assistant", "type": "recommendations",
                             "summary": summary, "recommendations": ai_recommendations,
                             "content": summary
                         })
+                        # Rerun so sidebar re-renders with updated search history
+                        st.rerun()
 
                 except Exception as e:
                     st.session_state.pending_retry = True
