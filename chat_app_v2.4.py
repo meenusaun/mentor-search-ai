@@ -7,6 +7,7 @@ import anthropic
 import os
 import json
 import re
+from datetime import datetime
 import pdfplumber
 import docx
 from io import BytesIO
@@ -67,13 +68,35 @@ expert_uploaded_file = st.sidebar.file_uploader(
 
 # ------------------ CLEAR CHAT BUTTON ------------------
 st.sidebar.markdown("---")
-if st.sidebar.button("🗑️ Clear Chat History"):
+if st.sidebar.button("🗑️ Clear Chat & History"):
     st.session_state.messages = []
     st.session_state.last_recommendations = []
     st.session_state.last_query = ""
     st.session_state.pending_retry = False
     st.session_state.retry_query = ""
+    st.session_state.search_history = []
     st.rerun()
+
+# ------------------ SIDEBAR: RECENT SEARCHES ------------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("🕘 Recent Searches")
+
+if not st.session_state.get("search_history"):
+    st.sidebar.caption("No searches yet. Your recent prompts will appear here.")
+else:
+    recent_prompts = list(reversed(st.session_state.search_history))[:10]
+    for i, item in enumerate(recent_prompts):
+        label = item["query"][:40] + ("…" if len(item["query"]) > 40 else "")
+        meta  = f"🏆{item['tier1']} · 🔍{item['tier2']}  {item['timestamp']}"
+        if st.sidebar.button(
+            f"↩ {label}",
+            key=f"sidebar_rerun_{i}",
+            use_container_width=True,
+            help=item["query"]   # full query on hover
+        ):
+            st.session_state._rerun_query = item["query"]
+            st.rerun()
+        st.sidebar.caption(meta)
 
 # ------------------ DOCUMENT EXTRACTION UTILS ------------------
 def extract_text_from_pdf_bytes(file_bytes):
@@ -146,7 +169,8 @@ def load_data():
         "Expertise", "Secondary Expertise", "Industry", "Secondary Industry",
         "Description", "Expertise Tags", "Industry Tags",
         "Document Path", "LinkedIn", "Qualification",
-        "Current Organization", "Current Designation"
+        "Current Organization", "Current Designation",
+        "Program", "Years of Experience"
     ]
     for col in required_cols:
         if col not in df.columns:
@@ -176,6 +200,11 @@ def load_data():
 
 df = load_data()
 
+# ── Lookup dicts built once at startup — fast O(1) access per card ──
+program_lookup    = df.set_index("Name")["Program"].to_dict()           if "Program"            in df.columns else {}
+experience_lookup = df.set_index("Name")["Years of Experience"].to_dict() if "Years of Experience" in df.columns else {}
+linkedin_lookup   = df.set_index("Name")["LinkedIn"].to_dict()           if "LinkedIn"           in df.columns else {}
+
 # ------------------ LOAD MODEL ------------------
 @st.cache_resource
 def load_model():
@@ -189,6 +218,48 @@ def get_vectors(texts):
     return model.encode(texts, batch_size=64, show_progress_bar=False)
 
 vectors = get_vectors(df["combined"].tolist())
+
+# ------------------ PROGRAM FILTER ------------------
+# Placed here so df and vectors are both available.
+# Sidebar widgets defined after df is loaded — Streamlit renders them top-to-bottom
+# in the sidebar regardless of where in the script they are written.
+
+_all_programs = sorted(set(
+    p.strip()
+    for val in df["Program"]
+    for p in str(val).split(",")
+    if p.strip() and p.strip().lower() not in ("nan", "none", "")
+))
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 Filter by Program")
+st.sidebar.caption("Leave empty to search all mentors.")
+
+selected_programs = st.sidebar.multiselect(
+    "Program(s)",
+    options=_all_programs,
+    default=[],
+    key="program_filter",
+    placeholder="All programs"
+)
+
+if selected_programs:
+    _prog_mask = df["Program"].apply(
+        lambda x: any(
+            sel.strip() in [p.strip() for p in str(x).split(",")]
+            for sel in selected_programs
+        )
+    )
+    filtered_df = df[_prog_mask].reset_index(drop=True)
+    filtered_vectors = get_vectors(filtered_df["combined"].tolist())
+    st.sidebar.info(
+        f"🔎 **{len(filtered_df)}** mentor(s) in: "
+        f"{', '.join(selected_programs)}"
+    )
+else:
+    filtered_df = df
+    filtered_vectors = vectors
+    st.sidebar.caption(f"🔎 Searching all **{len(df)}** mentors")
 
 # ------------------ EXTRACT UPLOADED FILE TEXTS ------------------
 founder_doc_text = ""
@@ -218,6 +289,26 @@ if "pending_retry" not in st.session_state:
     st.session_state.pending_retry = False
 if "retry_query" not in st.session_state:
     st.session_state.retry_query = ""
+if "search_history" not in st.session_state:
+    st.session_state.search_history = []  # max 10 items, {query, timestamp, tier1, tier2}
+
+# ------------------ SAVE TO HISTORY HELPER ------------------
+def save_to_history(query, tier1_count, tier2_count):
+    """Saves a search to history. Keeps only the last 10 unique queries."""
+    # Remove duplicate if same query already exists
+    st.session_state.search_history = [
+        h for h in st.session_state.search_history
+        if h["query"].strip().lower() != query.strip().lower()
+    ]
+    st.session_state.search_history.append({
+        "query": query,
+        "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "tier1": tier1_count,
+        "tier2": tier2_count,
+    })
+    # Keep only latest 10
+    if len(st.session_state.search_history) > 10:
+        st.session_state.search_history = st.session_state.search_history[-10:]
 
 # ------------------ INTENT DETECTION ------------------
 def detect_intent(user_input, last_recommendations):
@@ -272,6 +363,41 @@ MINIMUM RESULT RULES — CRITICAL:
         )
         return response.content[0].text
 
+# ------------------ PROGRAM BADGE HELPER ------------------
+def render_program_badge(expert_name):
+    prog_val = program_lookup.get(expert_name, "").strip()
+    if not prog_val or prog_val.lower() in ("", "nan", "none"):
+        return
+    prog_list = [p.strip() for p in prog_val.split(",") if p.strip()]
+    if not prog_list:
+        return
+    badges_html = " ".join([
+        f"<span style='background:#1F4E79;color:white;padding:3px 10px;"
+        f"border-radius:12px;font-size:12px;margin-right:4px;font-weight:500;'>"
+        f"📌 {p}</span>"
+        for p in prog_list
+    ])
+    st.markdown(
+        f"<div style='margin-bottom:8px;'>"
+        f"<span style='font-size:13px;color:#555;font-weight:500;'>Program: </span>"
+        f"{badges_html}</div>",
+        unsafe_allow_html=True
+    )
+
+# ------------------ EXPERIENCE BADGE HELPER ------------------
+def render_experience_badge(expert_name):
+    exp_val = experience_lookup.get(expert_name, "").strip()
+    if not exp_val or exp_val.lower() in ("", "nan", "none"):
+        return
+    st.markdown(
+        f"<div style='margin-bottom:12px;'>"
+        f"<span style='font-size:13px;color:#555;font-weight:500;'>Experience: </span>"
+        f"<span style='background:#E2EFDA;color:#375623;padding:3px 10px;"
+        f"border-radius:12px;font-size:12px;font-weight:500;'>"
+        f"🏅 {exp_val}</span></div>",
+        unsafe_allow_html=True
+    )
+
 # ------------------ DISPLAY SINGLE EXPERT CARD ------------------
 def display_expert_card(expert, index, tier_label, source_df):
     hands_on = expert.get("Hands On Experience", "").strip()
@@ -282,13 +408,17 @@ def display_expert_card(expert, index, tier_label, source_df):
     else:
         badge = "🔴 No Direct Experience"
 
-    overall = expert.get("Overall Score", "N/A")
+    overall   = expert.get("Overall Score", "N/A")
+    expert_name = expert.get("Name", "N/A")
 
     with st.expander(
-        f"#{index} — {expert.get('Name', 'N/A')} | "
-        f"⭐ {overall}/10 | {badge}",
+        f"#{index} — {expert_name} | ⭐ {overall}/10 | {badge}",
         expanded=(index == 1)
     ):
+        # ── Meta badges row ──
+        render_program_badge(expert_name)
+        render_experience_badge(expert_name)
+
         st.markdown("### 📊 Match Scorecard")
         sc1, sc2, sc3, sc4 = st.columns(4)
 
@@ -328,8 +458,7 @@ def display_expert_card(expert, index, tier_label, source_df):
         else:
             st.error(f"❌ No Hands-on/Operator Experience — {expert.get('Hands On Details', '')}")
 
-        linkedin_map = source_df.set_index("Name")["LinkedIn"].to_dict()
-        linkedin = linkedin_map.get(expert.get("Name", ""), "")
+        linkedin = linkedin_lookup.get(expert_name, "")
         if linkedin and str(linkedin).strip() != "":
             st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
 
@@ -515,12 +644,9 @@ Return only the JSON array. No extra text, no markdown outside the array.
             json.loads(match_json.group()) if match_json else []
         )
 
-    # ── PYTHON-LEVEL FALLBACK ──────────────────────────────────────────
-    # If AI still returned empty despite the prompt guarantee,
-    # force the top 2 semantically scored experts in as Tier 2
+    # ── PYTHON-LEVEL FALLBACK ──
     if not ai_recommendations:
-        fallback_candidates = candidates.head(2)
-        for _, row in fallback_candidates.iterrows():
+        for _, row in candidates.head(2).iterrows():
             ai_recommendations.append({
                 "Tier": "2",
                 "Name": row.get("Name", "Unknown"),
@@ -558,38 +684,30 @@ for message in st.session_state.messages:
             st.markdown(message["content"])
         elif message.get("type") == "retry_prompt":
             st.markdown(message["content"])
-            # Show Yes/No buttons only for the latest retry prompt
             if message == st.session_state.messages[-1] and st.session_state.pending_retry:
                 col_yes, col_no, col_gap = st.columns([1, 1, 4])
                 with col_yes:
                     if st.button("✅ Yes, retry", key="retry_yes"):
                         retry_q = st.session_state.retry_query
                         st.session_state.pending_retry = False
-                        st.session_state.messages.append({
-                            "role": "user", "content": "Yes"
-                        })
+                        st.session_state.messages.append({"role": "user", "content": "Yes"})
                         with st.spinner("Retrying your search..."):
                             try:
-                                retry_results = run_search(retry_q, df, vectors)
+                                retry_results = run_search(retry_q, filtered_df, filtered_vectors)
                                 st.session_state.last_recommendations = retry_results
                                 st.session_state.last_query = retry_q
                                 t1 = len([r for r in retry_results if r.get("Tier") == "1"])
                                 t2 = len([r for r in retry_results if r.get("Tier") == "2"])
-                                retry_summary = (
-                                    f"Found **{t1} Tier 1 expert(s)** and "
-                                    f"**{t2} Tier 2 expert(s)**."
-                                )
+                                save_to_history(retry_q, t1, t2)
+                                retry_summary = f"Found **{t1} Tier 1 expert(s)** and **{t2} Tier 2 expert(s)**."
                                 st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "type": "recommendations",
-                                    "summary": retry_summary,
-                                    "recommendations": retry_results,
+                                    "role": "assistant", "type": "recommendations",
+                                    "summary": retry_summary, "recommendations": retry_results,
                                     "content": retry_summary
                                 })
                             except Exception as e:
                                 st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "type": "text",
+                                    "role": "assistant", "type": "text",
                                     "content": f"Sorry, encountered an error: {e}"
                                 })
                         st.rerun()
@@ -598,18 +716,26 @@ for message in st.session_state.messages:
                         st.session_state.pending_retry = False
                         st.session_state.retry_query = ""
                         st.session_state.messages.append({
-                            "role": "assistant",
-                            "type": "text",
+                            "role": "assistant", "type": "text",
                             "content": "No problem! Feel free to try a new search anytime."
                         })
                         st.rerun()
         else:
             st.markdown(message["content"])
 
+# ------------------ HANDLE RE-RUN FROM HISTORY ------------------
+if st.session_state.get("_rerun_query"):
+    user_input = st.session_state._rerun_query
+    st.session_state._rerun_query = None
+else:
+    user_input = None
+
 # ------------------ USER INPUT ------------------
-user_input = st.chat_input(
+chat_input = st.chat_input(
     "Describe your business, ask a follow-up, or start a new search..."
 )
+if chat_input:
+    user_input = chat_input
 
 # ------------------ PROCESS INPUT ------------------
 if user_input:
@@ -624,7 +750,6 @@ if user_input:
     if intent == "followup":
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-
                 conversation_history = ""
                 for msg in st.session_state.messages[-6:]:
                     role = "Founder" if msg["role"] == "user" else "Assistant"
@@ -660,9 +785,7 @@ Instructions:
                     followup_response = call_ai(followup_prompt, max_tokens=1024)
                     st.markdown(followup_response)
                     st.session_state.messages.append({
-                        "role": "assistant",
-                        "type": "text",
-                        "content": followup_response
+                        "role": "assistant", "type": "text", "content": followup_response
                     })
                 except Exception as e:
                     st.error(f"AI Error: {e}")
@@ -672,49 +795,39 @@ Instructions:
         with st.chat_message("assistant"):
             with st.spinner("Searching for the best experts..."):
                 try:
-                    ai_recommendations = run_search(user_input, df, vectors)
+                    ai_recommendations = run_search(user_input, filtered_df, filtered_vectors)
 
-                    # ── ZERO RESULTS → trigger retry prompt ──
                     if not ai_recommendations:
                         st.session_state.pending_retry = True
                         st.session_state.retry_query = user_input
-
                         retry_msg = (
                             "🔍 Looks like I encountered a glitch and couldn't retrieve results. "
                             "Shall I try again?\n\n**Type Yes or No, or use the buttons below.**"
                         )
                         st.markdown(retry_msg)
-
                         col_yes, col_no, col_gap = st.columns([1, 1, 4])
                         with col_yes:
                             if st.button("✅ Yes, retry", key="inline_retry_yes"):
                                 retry_q = st.session_state.retry_query
                                 st.session_state.pending_retry = False
-                                st.session_state.messages.append({
-                                    "role": "user", "content": "Yes"
-                                })
-                                with st.spinner("Retrying your search..."):
+                                st.session_state.messages.append({"role": "user", "content": "Yes"})
+                                with st.spinner("Retrying..."):
                                     try:
-                                        retry_results = run_search(retry_q, df, vectors)
+                                        retry_results = run_search(retry_q, filtered_df, filtered_vectors)
                                         st.session_state.last_recommendations = retry_results
                                         st.session_state.last_query = retry_q
                                         t1 = len([r for r in retry_results if r.get("Tier") == "1"])
                                         t2 = len([r for r in retry_results if r.get("Tier") == "2"])
-                                        retry_summary = (
-                                            f"Found **{t1} Tier 1 expert(s)** and "
-                                            f"**{t2} Tier 2 expert(s)**."
-                                        )
+                                        save_to_history(retry_q, t1, t2)
+                                        retry_summary = f"Found **{t1} Tier 1 expert(s)** and **{t2} Tier 2 expert(s)**."
                                         st.session_state.messages.append({
-                                            "role": "assistant",
-                                            "type": "recommendations",
-                                            "summary": retry_summary,
-                                            "recommendations": retry_results,
+                                            "role": "assistant", "type": "recommendations",
+                                            "summary": retry_summary, "recommendations": retry_results,
                                             "content": retry_summary
                                         })
                                     except Exception as e:
                                         st.session_state.messages.append({
-                                            "role": "assistant",
-                                            "type": "text",
+                                            "role": "assistant", "type": "text",
                                             "content": f"Sorry, encountered an error: {e}"
                                         })
                                 st.rerun()
@@ -723,91 +836,76 @@ Instructions:
                                 st.session_state.pending_retry = False
                                 st.session_state.retry_query = ""
                                 st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "type": "text",
+                                    "role": "assistant", "type": "text",
                                     "content": "No problem! Feel free to try a new search anytime."
                                 })
                                 st.rerun()
-
                         st.session_state.messages.append({
-                            "role": "assistant",
-                            "type": "retry_prompt",
-                            "content": retry_msg
+                            "role": "assistant", "type": "retry_prompt", "content": retry_msg
                         })
 
                     else:
-                        # ── RESULTS FOUND ──
                         st.session_state.last_recommendations = ai_recommendations
                         st.session_state.last_query = user_input
                         st.session_state.pending_retry = False
 
-                        tier1_count = len(
-                            [m for m in ai_recommendations if m.get("Tier") == "1"]
-                        )
-                        tier2_count = len(
-                            [m for m in ai_recommendations if m.get("Tier") == "2"]
-                        )
+                        tier1_count = len([m for m in ai_recommendations if m.get("Tier") == "1"])
+                        tier2_count = len([m for m in ai_recommendations if m.get("Tier") == "2"])
 
+                        save_to_history(user_input, tier1_count, tier2_count)
+
+                        prog_note = (
+                            f"  *(filtered to: {', '.join(selected_programs)})*"
+                            if selected_programs else ""
+                        )
                         summary = (
                             f"Found **{tier1_count} Tier 1 expert(s)** "
                             f"(Industry + Operator experience match) and "
-                            f"**{tier2_count} Tier 2 expert(s)** (partial match).\n\n"
+                            f"**{tier2_count} Tier 2 expert(s)** (partial match)"
+                            f"{prog_note}.\n\n"
                             f"You can ask me to **compare any two experts**, "
                             f"**tell me more about a specific expert**, "
                             f"**refine the search**, or **start a new search** anytime."
                         )
-                        st.markdown(summary)
-                        display_expert_results(ai_recommendations, df)
-
                         st.session_state.messages.append({
-                            "role": "assistant",
-                            "type": "recommendations",
-                            "summary": summary,
-                            "recommendations": ai_recommendations,
+                            "role": "assistant", "type": "recommendations",
+                            "summary": summary, "recommendations": ai_recommendations,
                             "content": summary
                         })
+                        # Rerun so sidebar re-renders with updated search history
+                        st.rerun()
 
                 except Exception as e:
-                    # ── EXCEPTION → also trigger retry ──
                     st.session_state.pending_retry = True
                     st.session_state.retry_query = user_input
-
                     retry_msg = (
                         "🔍 Looks like I encountered a glitch and couldn't retrieve results. "
                         "Shall I try again?\n\n**Type Yes or No, or use the buttons below.**"
                     )
                     st.markdown(retry_msg)
-
                     col_yes, col_no, col_gap = st.columns([1, 1, 4])
                     with col_yes:
                         if st.button("✅ Yes, retry", key="err_retry_yes"):
                             retry_q = st.session_state.retry_query
                             st.session_state.pending_retry = False
-                            st.session_state.messages.append({
-                                "role": "user", "content": "Yes"
-                            })
-                            with st.spinner("Retrying your search..."):
+                            st.session_state.messages.append({"role": "user", "content": "Yes"})
+                            with st.spinner("Retrying..."):
                                 try:
-                                    retry_results = run_search(retry_q, df, vectors)
+                                    retry_results = run_search(retry_q, filtered_df, filtered_vectors)
                                     st.session_state.last_recommendations = retry_results
                                     st.session_state.last_query = retry_q
                                     t1 = len([r for r in retry_results if r.get("Tier") == "1"])
                                     t2 = len([r for r in retry_results if r.get("Tier") == "2"])
-                                    retry_summary = (
-                                        f"Found **{t1} Tier 1 expert(s)** and "
-                                        f"**{t2} Tier 2 expert(s)**."
-                                    )
+                                    save_to_history(retry_q, t1, t2)
+                                    retry_summary = f"Found **{t1} Tier 1 expert(s)** and **{t2} Tier 2 expert(s)**."
                                     st.session_state.messages.append({
-                                        "role": "assistant",
-                                        "type": "recommendations",
-                                        "summary": retry_summary,
-                                        "recommendations": retry_results,
+                                        "role": "assistant", "type": "recommendations",
+                                        "summary": retry_summary, "recommendations": retry_results,
                                         "content": retry_summary
                                     })
                                 except Exception as e:
                                     st.session_state.messages.append({
-                                        "role": "assistant",
-                                        "type": "text",
+                                        "role": "assistant", "type": "text",
                                         "content": f"Sorry, encountered an error: {e}"
                                     })
                             st.rerun()
@@ -816,16 +914,12 @@ Instructions:
                             st.session_state.pending_retry = False
                             st.session_state.retry_query = ""
                             st.session_state.messages.append({
-                                "role": "assistant",
-                                "type": "text",
+                                "role": "assistant", "type": "text",
                                 "content": "No problem! Feel free to try a new search anytime."
                             })
                             st.rerun()
-
                     st.session_state.messages.append({
-                        "role": "assistant",
-                        "type": "retry_prompt",
-                        "content": retry_msg
+                        "role": "assistant", "type": "retry_prompt", "content": retry_msg
                     })
 
     # -------- UPLOADED EXPERT PROFILE SCORING --------
@@ -896,33 +990,29 @@ Return only the JSON object. No extra text.
                         )
 
                     if score_result:
-                        expert_name = score_result.get(
-                            "Uploaded Expert Name", "Uploaded Expert"
-                        )
-                        score_val = score_result.get("Overall Score", "N/A")
-                        hands_on_val = score_result.get(
-                            "Hands On Experience", ""
-                        ).strip()
-                        tier_val = score_result.get("Tier", "2")
+                        expert_name = score_result.get("Uploaded Expert Name", "Uploaded Expert")
+                        score_val   = score_result.get("Overall Score", "N/A")
+                        hands_on_val = score_result.get("Hands On Experience", "").strip()
+                        tier_val    = score_result.get("Tier", "2")
                         tier_reason = score_result.get("Tier Reason", "")
 
                         tier_color = "🏆" if tier_val == "1" else "🔍"
                         st.markdown(
-                            f"---\n#### {tier_color} Uploaded Expert — "
-                            f"{expert_name} | Tier {tier_val}"
+                            f"---\n#### {tier_color} Uploaded Expert — {expert_name} | Tier {tier_val}"
                         )
-
                         if tier_val == "1":
                             st.success(f"✅ Tier 1 — {tier_reason}")
                         else:
                             st.warning(f"⚠️ Tier 2 — {tier_reason}")
 
+                        # Program + experience badges for uploaded expert
+                        render_program_badge(expert_name)
+                        render_experience_badge(expert_name)
+
                         st.markdown("### 📊 Match Scorecard")
                         sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-
                         with sc1:
                             st.metric("⭐ Overall", f"{score_val} / 10")
-
                         for col, key, label, max_val in [
                             (sc2, "Industry Match Score", "🏭 Industry", "3"),
                             (sc3, "Hands On Score", "🛠️ Hands-on/Operator Exp", "3"),
@@ -941,21 +1031,13 @@ Return only the JSON object. No extra text.
                                     st.caption(parts[1].strip())
 
                         st.markdown("---")
-
                         st.markdown("**🛠️ Hands-on/Operator Experience**")
                         if hands_on_val == "Yes":
-                            st.success(
-                                f"🟢 Yes — Hands-on/Operator — {score_result.get('Hands On Details', '')}"
-                            )
+                            st.success(f"🟢 Yes — Hands-on/Operator — {score_result.get('Hands On Details', '')}")
                         elif hands_on_val == "Partial":
-                            st.warning(
-                                f"🟡 Partial Hands-on/Operator — "
-                                f"{score_result.get('Hands On Details', '')}"
-                            )
+                            st.warning(f"🟡 Partial Hands-on/Operator — {score_result.get('Hands On Details', '')}")
                         else:
-                            st.error(
-                                f"🔴 No Hands-on/Operator Experience — {score_result.get('Hands On Details', '')}"
-                            )
+                            st.error(f"🔴 No Hands-on/Operator Experience — {score_result.get('Hands On Details', '')}")
 
                         col1, col2 = st.columns(2)
                         with col1:
@@ -976,15 +1058,13 @@ Return only the JSON object. No extra text.
                         st.markdown("**📝 Match Summary**")
                         st.write(score_result.get("Match Summary", "N/A"))
 
-                        score_content = (
-                            f"Uploaded expert **{expert_name}** is "
-                            f"**Tier {tier_val}** with score **{score_val}/10**. "
-                            f"{tier_reason}"
-                        )
                         st.session_state.messages.append({
-                            "role": "assistant",
-                            "type": "expert_score",
-                            "content": score_content
+                            "role": "assistant", "type": "expert_score",
+                            "content": (
+                                f"Uploaded expert **{expert_name}** is "
+                                f"**Tier {tier_val}** with score **{score_val}/10**. "
+                                f"{tier_reason}"
+                            )
                         })
 
                 except Exception as e:
