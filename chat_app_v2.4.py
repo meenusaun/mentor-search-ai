@@ -170,7 +170,13 @@ def load_data():
         "Description", "Expertise Tags", "Industry Tags",
         "Document Path", "LinkedIn", "Qualification",
         "Current Organization", "Current Designation",
-        "Program", "Years of Experience"
+        "Program", "Years of Experience",
+        # ── New problem-statement columns ──
+        "What is the one business problem you are most qualified to advise on from direct experience?",
+        "Other Experience(s), if any",
+        "Industry - Operator Data",
+        "What revenue stage do you understand best from the inside? (Select one only)",
+        "Describe one time you helped a business break through a growth ceiling.* (What was the ceiling, and what specifically changed?)",
     ]
     for col in required_cols:
         if col not in df.columns:
@@ -185,17 +191,48 @@ def load_data():
     else:
         df["Doc Text"] = df["Document Path"].apply(extract_text_from_file_path)
 
+    # Parse "Industry - Operator Data" — pipe-separated, positional
+    # Position maps to the 15 industry labels in order
+    _INDUSTRY_LABELS = [
+        "Agri / Food Processing", "Manufacturing", "Healthcare", "Climate Tech",
+        "Deep Tech", "Enterprise Tech", "D2C / B2C", "Services",
+        "Fintech & Financial Services", "Automotive & Auto Components",
+        "Media & Entertainment", "HR Services", "Legal Services",
+        "Transportation & Logistics", "Other (please specify)",
+    ]
+    def parse_operator_industries(val):
+        parts = [p.strip() for p in str(val).split("|")]
+        active = [
+            _INDUSTRY_LABELS[i]
+            for i, p in enumerate(parts)
+            if p and p.lower() not in ("", "nan", "0", "no", "false") and i < len(_INDUSTRY_LABELS)
+        ]
+        return ", ".join(active) if active else ""
+
+    df["Active Industries"] = df["Industry - Operator Data"].apply(parse_operator_industries)
+
+    # Helper: safe column read (returns empty string if column missing)
+    def col(name):
+        return df[name] if name in df.columns else ""
+
     df["combined"] = (
-        "Expertise: " + df["Expertise"] + ". " +
-        "Secondary Expertise: " + df["Secondary Expertise"] + ". " +
-        "Industry: " + df["Industry"] + ". " +
-        "Secondary Industry: " + df["Secondary Industry"] + ". " +
-        "Description: " + df["Description"] + ". " +
-        "Tags: " + df["Expertise Tags"] + " " + df["Industry Tags"] + ". " +
-        "Qualification: " + df["Qualification"] + ". " +
-        "Current Organization: " + df["Current Organization"] + ". " +
-        "Current Designation: " + df["Current Designation"]
+        "Expertise: " + col("Expertise") + ". " +
+        "Secondary Expertise: " + col("Secondary Expertise") + ". " +
+        "Industry: " + col("Industry") + ". " +
+        "Secondary Industry: " + col("Secondary Industry") + ". " +
+        "Active Industry Sectors: " + col("Active Industries") + ". " +
+        "Description: " + col("Description") + ". " +
+        "Tags: " + col("Expertise Tags") + " " + col("Industry Tags") + ". " +
+        "Qualification: " + col("Qualification") + ". " +
+        "Current Organization: " + col("Current Organization") + ". " +
+        "Current Designation: " + col("Current Designation") + ". " +
+        "Core Business Problem Advised: " + col("What is the one business problem you are most qualified to advise on from direct experience?") + ". " +
+        "Other Experiences: " + col("Other Experience(s), if any") + ". " +
+        "Revenue Stage Expertise: " + col("What revenue stage do you understand best from the inside? (Select one only)") + ". " +
+        "Growth Ceiling Story: " + col("Describe one time you helped a business break through a growth ceiling.* (What was the ceiling, and what specifically changed?)")
     )
+    # Ensure every combined value is a clean plain string — no NaN, no None, no floats
+    df["combined"] = df["combined"].fillna("").astype(str).str.strip()
     return df
 
 df = load_data()
@@ -215,7 +252,9 @@ model = load_model()
 # ------------------ CREATE VECTORS ------------------
 @st.cache_data
 def get_vectors(texts):
-    return model.encode(texts, batch_size=64, show_progress_bar=False)
+    # Guarantee every item is a non-empty plain string before encoding
+    clean = [str(t).strip() if t and str(t).strip() else "no information available" for t in texts]
+    return model.encode(clean, batch_size=64, show_progress_bar=False)
 
 vectors = get_vectors(df["combined"].tolist())
 
@@ -458,6 +497,33 @@ def display_expert_card(expert, index, tier_label, source_df):
         else:
             st.error(f"❌ No Hands-on/Operator Experience — {expert.get('Hands On Details', '')}")
 
+        # ── New insight fields (only shown if present) ──
+        core_problem_match = expert.get("Core Problem Match", "").strip()
+        revenue_fit        = expert.get("Revenue Stage Fit", "").strip()
+        growth_relevance   = expert.get("Growth Ceiling Relevance", "").strip()
+
+        show_new = any(
+            v and v.lower() not in ("not specified", "n/a", "")
+            for v in [core_problem_match, revenue_fit, growth_relevance]
+        )
+
+        if show_new:
+            st.markdown("---")
+            st.markdown("**🎯 Problem & Stage Fit**")
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                if core_problem_match and core_problem_match.lower() not in ("not specified", "n/a", ""):
+                    st.markdown("**🔑 Core Problem Match**")
+                    st.caption(core_problem_match)
+            with col_b:
+                if revenue_fit and revenue_fit.lower() not in ("not specified", "n/a", ""):
+                    st.markdown("**📈 Revenue Stage Fit**")
+                    st.caption(revenue_fit)
+            with col_c:
+                if growth_relevance and growth_relevance.lower() not in ("not specified", "n/a", ""):
+                    st.markdown("**🚀 Growth Ceiling Relevance**")
+                    st.caption(growth_relevance)
+
         linkedin = linkedin_lookup.get(expert_name, "")
         if linkedin and str(linkedin).strip() != "":
             st.markdown(f"[🔗 View LinkedIn Profile]({linkedin})")
@@ -495,6 +561,20 @@ def display_expert_results(ai_recommendations, source_df):
             display_expert_card(expert, i + 1, "Tier 2", source_df)
 
 # ------------------ CORE SEARCH FUNCTION ------------------
+# ── Stopwords for keyword extraction ──────────────────────────────────
+_SEARCH_STOPWORDS = {
+    "looking", "experts", "expert", "need", "help", "want", "mentor",
+    "mentors", "industry", "with", "from", "that", "have", "for", "the",
+    "and", "who", "can", "are", "best", "good", "find", "show", "give",
+    "someone", "person", "people", "startup", "business", "company",
+    "founder", "their", "this", "about", "know", "does", "has"
+}
+
+def extract_keywords(query):
+    """Extract meaningful keywords from the query for exact-match boosting."""
+    words = re.findall(r'\b[\w&/]+\b', query.lower())
+    return [w for w in words if len(w) > 2 and w not in _SEARCH_STOPWORDS]
+
 def run_search(query, source_df, source_vectors):
     enriched_query = query
     if founder_doc_text:
@@ -503,14 +583,33 @@ def run_search(query, source_df, source_vectors):
             f"Context from business document:\n{founder_doc_text[:1500]}"
         )
 
+    # ── Step 1: Semantic similarity ──────────────────────────────────────
     query_vec = model.encode([enriched_query])
     similarity = cosine_similarity(query_vec, source_vectors)
     source_df = source_df.copy()
-    source_df["score"] = similarity[0]
+    source_df["semantic_score"] = similarity[0]
+
+    # ── Step 2: Keyword boost ─────────────────────────────────────────────
+    # For each keyword in the query, award +0.08 per exact match found
+    # anywhere in the mentor's combined text. This rescues niche terms
+    # (e.g. "HORECA", "D2C", "SaaS") that have weak semantic embeddings.
+    keywords = extract_keywords(query)
+    if keywords:
+        def keyword_score(combined_text):
+            text_lower = str(combined_text).lower()
+            return sum(0.08 for kw in keywords if kw in text_lower)
+        source_df["keyword_boost"] = source_df["combined"].apply(keyword_score)
+    else:
+        source_df["keyword_boost"] = 0.0
+
+    # ── Step 3: Combined score — semantic + keyword boost ─────────────────
+    source_df["score"] = source_df["semantic_score"] + source_df["keyword_boost"]
+
+    # ── Step 4: Sort and take top 30 (expanded from 20 for better recall) ─
     candidates = source_df.sort_values(
         by=["score", "Name"],
         ascending=[False, True]
-    ).head(20)
+    ).head(30)
 
     expert_info = ""
     for _, row in candidates.iterrows():
@@ -519,15 +618,34 @@ def run_search(query, source_df, source_vectors):
             if row["Doc Text"] and len(row["Doc Text"]) > 50
             else "Not available"
         )
+        # Collect active industry sectors
+        active_sectors = row.get("Active Industries", "").strip()
+
+        # New problem-statement fields (show only if non-empty)
+        core_problem  = row.get("What is the one business problem you are most qualified to advise on from direct experience?", "").strip()
+        other_exp     = row.get("Other Experience(s), if any", "").strip()
+        revenue_stage = row.get("What revenue stage do you understand best from the inside? (Select one only)", "").strip()
+        growth_story  = row.get("Describe one time you helped a business break through a growth ceiling.* (What was the ceiling, and what specifically changed?)", "").strip()
+
+        def r(col_name):
+            """Safe row getter — returns empty string if column missing."""
+            v = row.get(col_name, "")
+            return str(v).strip() if v and str(v).strip().lower() not in ("nan", "0") else ""
+
         expert_info += f"""
 Name: {row['Name']}
-Expertise: {row['Expertise']}
-Secondary Expertise: {row['Secondary Expertise']}
-Industry: {row['Industry']}
-Current Designation: {row['Current Designation']}
-Current Organization: {row['Current Organization']}
-Qualification: {row['Qualification']}
-Description: {row['Description']}
+Expertise: {r('Expertise')}
+Secondary Expertise: {r('Secondary Expertise')}
+Industry: {r('Industry')}
+Active Industry Sectors: {active_sectors if active_sectors else 'Not specified'}
+Current Designation: {r('Current Designation')}
+Current Organization: {r('Current Organization')}
+Qualification: {r('Qualification')}
+Description: {r('Description')}
+Core Business Problem They Can Advise On: {core_problem if core_problem else 'Not specified'}
+Other Experiences: {other_exp if other_exp and other_exp != '0' else 'Not specified'}
+Revenue Stage Expertise: {revenue_stage if revenue_stage else 'Not specified'}
+Growth Ceiling Story: {growth_story[:400] if growth_story else 'Not specified'}
 Document Summary: {doc_summary}
 ---
 """
@@ -560,15 +678,28 @@ Here are expert profiles to evaluate:
 
 TIER CLASSIFICATION RULES — This is the most important part:
 
+NEW DATA AVAILABLE — USE THESE FIELDS FOR STRONGER MATCHING:
+- "Core Business Problem They Can Advise On": This is the single problem the expert
+  is MOST qualified to advise on from direct experience. If this aligns with the
+  founder's problem → strong signal for Tier 1.
+- "Active Industry Sectors": Checkbox-based sectors the expert has worked in.
+  Use this alongside "Industry" for industry matching.
+- "Revenue Stage Expertise": The revenue stage the expert understands best from
+  the inside. Match this to where the founder's business is.
+- "Growth Ceiling Story": A real example of how the expert helped a business
+  break through a growth ceiling. If the ceiling described matches the founder's
+  problem → very strong Tier 1 signal.
+- "Other Experiences": Additional experiences beyond core expertise.
+
 TIER 1 — Strong Match (show minimum 1, maximum 5):
 An expert qualifies for Tier 1 ONLY if BOTH conditions are true:
   ✅ Condition 1 — Industry Match: The expert has directly worked IN the same
-     or very closely related industry as the founder's business. Not just advised
-     — actually worked in it as an operator, founder, or senior leader.
+     or very closely related industry as the founder's business. Use both the
+     Industry field AND Active Industry Sectors for this assessment.
   ✅ Condition 2 — Operator Experience: The expert has PERSONALLY done the
      specific task or solved the specific problem the founder is facing.
-     Not consulting, not teaching, not advising — actually done it themselves
-     on the ground as an operator.
+     Use "Core Business Problem They Can Advise On" and "Growth Ceiling Story"
+     as primary evidence for this condition.
 
 If even ONE condition is missing → expert goes to Tier 2, NOT Tier 1.
 Be strict. It is better to show 1 Tier 1 expert than to incorrectly
@@ -626,7 +757,10 @@ Format:
     "Current Organization": "their current organization",
     "Qualification": "their qualification",
     "Hands On Experience": "Yes / No / Partial",
-    "Hands On Details": "1-2 lines on what they have personally done as an operator. If No/Partial, state clearly what is missing."
+    "Hands On Details": "1-2 lines on what they have personally done as an operator. If No/Partial, state clearly what is missing.",
+    "Core Problem Match": "1 line — how their stated core business problem aligns with the founder's need (or 'Not specified' if field is empty)",
+    "Revenue Stage Fit": "1 line — the revenue stage this expert understands best and whether it matches the founder's stage (or 'Not specified' if field is empty)",
+    "Growth Ceiling Relevance": "1 line — whether their growth ceiling story is relevant to the founder's challenge (or 'Not specified' if field is empty)"
   }}
 ]
 
