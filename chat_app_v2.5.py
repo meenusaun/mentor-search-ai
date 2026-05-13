@@ -231,6 +231,8 @@ def load_data():
         "Revenue Stage Expertise: " + col("What revenue stage do you understand best from the inside? (Select one only)") + ". " +
         "Growth Ceiling Story: " + col("Describe one time you helped a business break through a growth ceiling.* (What was the ceiling, and what specifically changed?)")
     )
+    # Ensure every combined value is a clean plain string — no NaN, no None, no floats
+    df["combined"] = df["combined"].fillna("").astype(str).str.strip()
     return df
 
 df = load_data()
@@ -250,7 +252,9 @@ model = load_model()
 # ------------------ CREATE VECTORS ------------------
 @st.cache_data
 def get_vectors(texts):
-    return model.encode(texts, batch_size=64, show_progress_bar=False)
+    # Guarantee every item is a non-empty plain string before encoding
+    clean = [str(t).strip() if t and str(t).strip() else "no information available" for t in texts]
+    return model.encode(clean, batch_size=64, show_progress_bar=False)
 
 vectors = get_vectors(df["combined"].tolist())
 
@@ -557,6 +561,20 @@ def display_expert_results(ai_recommendations, source_df):
             display_expert_card(expert, i + 1, "Tier 2", source_df)
 
 # ------------------ CORE SEARCH FUNCTION ------------------
+# ── Stopwords for keyword extraction ──────────────────────────────────
+_SEARCH_STOPWORDS = {
+    "looking", "experts", "expert", "need", "help", "want", "mentor",
+    "mentors", "industry", "with", "from", "that", "have", "for", "the",
+    "and", "who", "can", "are", "best", "good", "find", "show", "give",
+    "someone", "person", "people", "startup", "business", "company",
+    "founder", "their", "this", "about", "know", "does", "has"
+}
+
+def extract_keywords(query):
+    """Extract meaningful keywords from the query for exact-match boosting."""
+    words = re.findall(r'\b[\w&/]+\b', query.lower())
+    return [w for w in words if len(w) > 2 and w not in _SEARCH_STOPWORDS]
+
 def run_search(query, source_df, source_vectors):
     enriched_query = query
     if founder_doc_text:
@@ -565,14 +583,33 @@ def run_search(query, source_df, source_vectors):
             f"Context from business document:\n{founder_doc_text[:1500]}"
         )
 
+    # ── Step 1: Semantic similarity ──────────────────────────────────────
     query_vec = model.encode([enriched_query])
     similarity = cosine_similarity(query_vec, source_vectors)
     source_df = source_df.copy()
-    source_df["score"] = similarity[0]
+    source_df["semantic_score"] = similarity[0]
+
+    # ── Step 2: Keyword boost ─────────────────────────────────────────────
+    # For each keyword in the query, award +0.08 per exact match found
+    # anywhere in the mentor's combined text. This rescues niche terms
+    # (e.g. "HORECA", "D2C", "SaaS") that have weak semantic embeddings.
+    keywords = extract_keywords(query)
+    if keywords:
+        def keyword_score(combined_text):
+            text_lower = str(combined_text).lower()
+            return sum(0.08 for kw in keywords if kw in text_lower)
+        source_df["keyword_boost"] = source_df["combined"].apply(keyword_score)
+    else:
+        source_df["keyword_boost"] = 0.0
+
+    # ── Step 3: Combined score — semantic + keyword boost ─────────────────
+    source_df["score"] = source_df["semantic_score"] + source_df["keyword_boost"]
+
+    # ── Step 4: Sort and take top 30 (expanded from 20 for better recall) ─
     candidates = source_df.sort_values(
         by=["score", "Name"],
         ascending=[False, True]
-    ).head(20)
+    ).head(30)
 
     expert_info = ""
     for _, row in candidates.iterrows():
