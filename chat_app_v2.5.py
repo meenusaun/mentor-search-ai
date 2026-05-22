@@ -1061,17 +1061,22 @@ with tab_session:
     if "si_tracker_url" not in st.session_state:
         st.session_state.si_tracker_url = st.secrets.get(
             "GITHUB_SESSION_TRACKER_URL",
-            "https://raw.githubusercontent.com/YOUR_ORG/YOUR_REPO/main/05_Session_Management_Tracker.xlsx"
+            "https://raw.githubusercontent.com/meenusaun/mentor-search-ai/main/05_Session_Management_Tracker.xlsx"
         )
     if "si_feedback_url" not in st.session_state:
         st.session_state.si_feedback_url = st.secrets.get(
             "GITHUB_FEEDBACK_TRACKER_URL",
-            "https://raw.githubusercontent.com/YOUR_ORG/YOUR_REPO/main/06_Feedback_Quality_Tracker.xlsx"
+            "https://raw.githubusercontent.com/meenusaun/mentor-search-ai/main/06_Feedback_Quality_Tracker.xlsx"
         )
 
     # ── GitHub URL config (collapsible) ──
-    with st.expander("⚙️ Data Source Configuration", expanded=False):
-        st.caption("Set the raw GitHub URLs for your tracker files. These can also be set in st.secrets.")
+    with st.expander("⚙️ Data Source Configuration — Set your GitHub URLs here", expanded=True):
+        st.caption("Replace **YOUR_REPO_NAME** with your actual GitHub repository name. Your username is already filled in as `meenusaun`.")
+        st.info(
+            "👆 Your GitHub username is **meenusaun**. "
+            "Just replace `YOUR_REPO_NAME` in both URLs below with your repository name, "
+            "then click **💾 Save URLs**."
+        )
         url_col1, url_col2 = st.columns(2)
         with url_col1:
             new_tracker_url = st.text_input(
