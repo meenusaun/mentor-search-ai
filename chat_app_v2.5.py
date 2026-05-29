@@ -827,14 +827,13 @@ with tab2:
         return sorted(vals)
 
     all_locations_ml = get_unique_vals("Location")
+    all_programs_ml  = get_unique_vals("Program")   # individual values e.g. "Accelerate", "Liftoff"
 
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
-        accelerate_only = st.checkbox(
-            "🎯 Accelerate Mentors Only",
-            value=False,
-            key="ml_accelerate_only",
-            help="Show only mentors whose Program includes 'Accelerate'"
+        sel_prog = st.multiselect(
+            "🎯 Program", options=all_programs_ml,
+            placeholder="All programs", key="ml_prog"
         )
     with fc2:
         sel_loc  = st.multiselect("📍 Location", options=all_locations_ml,
@@ -855,14 +854,9 @@ with tab2:
 
     ml_df = df.copy()
 
-    # Program: filter to rows where Program contains "Accelerate" (exact word match)
-    if accelerate_only:
-        ml_df = ml_df[ml_df["Program"].apply(
-            lambda x: any(
-                "accelerate" in p.strip().lower()
-                for p in str(x).split(",")
-            )
-        )]
+    # Program: match if any selected program appears in the mentor's comma-separated Program field
+    if sel_prog:
+        ml_df = ml_df[ml_df["Program"].apply(lambda x: matches_any(x, sel_prog))]
 
     if sel_loc:
         ml_df = ml_df[ml_df["Location"].apply(lambda x: matches_any(x, sel_loc))]
