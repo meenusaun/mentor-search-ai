@@ -845,6 +845,12 @@ with tab2:
         sec_search = st.text_input("🏭 Sector", placeholder="Type to search…",
                                     key="ml_sec_text")
 
+    accel_exclusive = st.checkbox(
+        "⚡ Show only mentors exclusively in Accelerate (no other programs)",
+        value=False,
+        key="ml_accel_exclusive"
+    )
+
     def matches_any(cell_val, selections, sep=","):
         parts = [p.strip() for p in str(cell_val).split(sep)]
         return any(sel in parts for sel in selections)
@@ -854,9 +860,15 @@ with tab2:
 
     ml_df = df.copy()
 
-    # Program: match if any selected program appears in the mentor's comma-separated Program field
+    # Program multiselect: match if any selected program appears in the field
     if sel_prog:
         ml_df = ml_df[ml_df["Program"].apply(lambda x: matches_any(x, sel_prog))]
+
+    # Exclusive Accelerate: Program field contains ONLY "Accelerate" and nothing else
+    if accel_exclusive:
+        ml_df = ml_df[ml_df["Program"].apply(
+            lambda x: [p.strip() for p in str(x).split(",") if p.strip()] == ["Accelerate"]
+        )]
 
     if sel_loc:
         ml_df = ml_df[ml_df["Location"].apply(lambda x: matches_any(x, sel_loc))]
