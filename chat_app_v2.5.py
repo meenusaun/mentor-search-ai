@@ -826,42 +826,56 @@ with tab2:
                     vals.add(part)
         return sorted(vals)
 
-    all_programs_ml  = get_unique_vals("Program")
     all_locations_ml = get_unique_vals("Location")
-    all_expertise_ml = sorted(set(get_unique_vals("Expertise") + get_unique_vals("Secondary Expertise")))
-    all_sector_ml    = sorted(set(get_unique_vals("Industry") + get_unique_vals("Secondary Industry")))
 
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
-        sel_prog = st.multiselect("🎯 Program", options=all_programs_ml,
-                                   placeholder="All", key="ml_prog")
+        accelerate_only = st.checkbox(
+            "🎯 Accelerate Mentors Only",
+            value=False,
+            key="ml_accelerate_only",
+            help="Show only mentors whose Program includes 'Accelerate'"
+        )
     with fc2:
         sel_loc  = st.multiselect("📍 Location", options=all_locations_ml,
                                    placeholder="All", key="ml_loc")
     with fc3:
-        sel_exp  = st.multiselect("💼 Expertise", options=all_expertise_ml,
-                                   placeholder="All", key="ml_exp")
+        exp_search = st.text_input("💼 Expertise", placeholder="Type to search…",
+                                    key="ml_exp_text")
     with fc4:
-        sel_sec  = st.multiselect("🏭 Sector", options=all_sector_ml,
-                                   placeholder="All", key="ml_sec")
+        sec_search = st.text_input("🏭 Sector", placeholder="Type to search…",
+                                    key="ml_sec_text")
 
     def matches_any(cell_val, selections, sep=","):
         parts = [p.strip() for p in str(cell_val).split(sep)]
         return any(sel in parts for sel in selections)
 
+    def contains_text(cell_val, query):
+        return query.strip().lower() in str(cell_val).lower()
+
     ml_df = df.copy()
-    if sel_prog:
-        ml_df = ml_df[ml_df["Program"].apply(lambda x: matches_any(x, sel_prog))]
+
+    # Program: filter to rows where Program contains "Accelerate" (exact word match)
+    if accelerate_only:
+        ml_df = ml_df[ml_df["Program"].apply(
+            lambda x: any(
+                "accelerate" in p.strip().lower()
+                for p in str(x).split(",")
+            )
+        )]
+
     if sel_loc:
         ml_df = ml_df[ml_df["Location"].apply(lambda x: matches_any(x, sel_loc))]
-    if sel_exp:
+
+    if exp_search.strip():
         ml_df = ml_df[ml_df.apply(
-            lambda row: matches_any(row.get("Expertise", ""), sel_exp) or
-                        matches_any(row.get("Secondary Expertise", ""), sel_exp), axis=1)]
-    if sel_sec:
+            lambda row: contains_text(row.get("Expertise", ""), exp_search) or
+                        contains_text(row.get("Secondary Expertise", ""), exp_search), axis=1)]
+
+    if sec_search.strip():
         ml_df = ml_df[ml_df.apply(
-            lambda row: matches_any(row.get("Industry", ""), sel_sec) or
-                        matches_any(row.get("Secondary Industry", ""), sel_sec), axis=1)]
+            lambda row: contains_text(row.get("Industry", ""), sec_search) or
+                        contains_text(row.get("Secondary Industry", ""), sec_search), axis=1)]
 
     st.markdown(f"**Total Mentors: {len(ml_df)}**")
     st.markdown("---")
