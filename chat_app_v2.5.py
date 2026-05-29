@@ -12,74 +12,6 @@ import pdfplumber
 import docx
 from io import BytesIO
 
-# ------------------ GITHUB DATA LOADER ------------------
-# Store these URLs in st.secrets:
-#   GITHUB_SESSION_TRACKER_URL  -> raw URL to 05_Session_Management_Tracker.xlsx
-#   GITHUB_FEEDBACK_TRACKER_URL -> raw URL to 06_Feedback_Quality_Tracker.xlsx
-
-@st.cache_data(ttl=300)
-def load_session_tracker(url: str):
-    """Load Session Tracker sheet from GitHub raw URL. Returns (df, error_msg)."""
-    try:
-        import requests
-        from io import BytesIO as _BIO
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        df = pd.read_excel(_BIO(resp.content), sheet_name="Session Tracker",
-                           engine="openpyxl", dtype=str, na_filter=False)
-        df.columns = [str(c).strip() for c in df.columns]
-        required = [
-            "Feedback ID", "Mentor Name", "Venture Name", "Ask",
-            "Meeting Summary", "Next Steps / Action Items", "Meeting ID",
-            "Session Type", "Meeting Date", "Follow-Up Required?",
-            "Session Status", "Hub", "Program Tier", "Feedback Comments",
-            "Feedback Rating (1-5)"
-        ]
-        for col in required:
-            if col not in df.columns:
-                df[col] = ""
-            else:
-                df[col] = df[col].astype(str).str.strip()
-        return df, None
-    except Exception as e:
-        return pd.DataFrame(), str(e)
-
-@st.cache_data(ttl=300)
-def load_feedback_tracker(url: str):
-    """Load Session Feedback sheet from GitHub raw URL. Returns (df, error_msg)."""
-    try:
-        import requests
-        from io import BytesIO as _BIO
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        df = pd.read_excel(_BIO(resp.content), sheet_name="Session Feedback",
-                           engine="openpyxl", dtype=str, na_filter=False)
-        df.columns = [str(c).strip() for c in df.columns]
-        required = [
-            "Respondent ID", "Overall Rating (1-5)", "Verbatim Feedback",
-            "How useful was this mentor session for your current business priorities?",
-            "Actionability of Advice", "Follow-Up Requested?",
-            "Flagged (≤3)?", "Response Category", "Venture Name", "Mentor Name"
-        ]
-        for col in required:
-            if col not in df.columns:
-                df[col] = ""
-            else:
-                df[col] = df[col].astype(str).str.strip()
-        return df, None
-    except Exception as e:
-        return pd.DataFrame(), str(e)
-
-def merge_session_feedback(df_sess, df_fb):
-    """Join Session Tracker and Session Feedback on Feedback ID = Respondent ID."""
-    if df_fb.empty or df_sess.empty:
-        return df_sess
-    fb_renamed = df_fb.copy()
-    fb_renamed.columns = [f"fb_{c}" if c != "Respondent ID" else c for c in fb_renamed.columns]
-    merged = df_sess.merge(fb_renamed, left_on="Feedback ID",
-                           right_on="Respondent ID", how="left")
-    return merged
-
 # ------------------ CLIENTS ------------------
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 openai_client = OpenAI()
@@ -238,7 +170,7 @@ def load_data():
         "Description", "Expertise Tags", "Industry Tags",
         "Document Path", "LinkedIn", "Qualification",
         "Current Organization", "Current Designation",
-        "Program", "Years of Experience",
+        "Program", "Years of Experience", "Location",
         # ── New problem-statement columns ──
         "What is the one business problem you are most qualified to advise on from direct experience?",
         "Other Experience(s), if any",
@@ -877,661 +809,91 @@ Return only the JSON array. No extra text, no markdown outside the array.
     return ai_recommendations
 
 # ------------------ TABS ------------------
-tab_search, tab_session = st.tabs([
-    "🔍 Expert Search",
-    "🧠 Session Intelligence"
-])
+tab1, tab2 = st.tabs(["🔍 Expert Search", "📋 Mentor List"])
 
-# ── Helper: render a full session analysis ─────────────────────────────────
-def _render_session_analysis(a, snap, mentor_name):
-    health = a.get("overall_session_health", {})
-    health_score = health.get("score", "N/A")
-    health_rec = health.get("recommendation", "")
+with tab2:
+    st.markdown("### 👥 Mentor List")
+    st.caption("Browse and filter all mentors in the pool.")
 
-    rec_colors = {
-        "Continue": "success", "Reconnect": "success",
-        "Needs Follow-up": "warning", "Try Different Mentor": "error"
+    def get_unique_vals(col_name, sep=","):
+        if col_name not in df.columns:
+            return []
+        vals = set()
+        for v in df[col_name].dropna():
+            for part in str(v).split(sep):
+                part = part.strip()
+                if part and part.lower() not in ("nan", "none", ""):
+                    vals.add(part)
+        return sorted(vals)
+
+    all_programs_ml  = get_unique_vals("Program")
+    all_locations_ml = get_unique_vals("Location")
+    all_expertise_ml = sorted(set(get_unique_vals("Expertise") + get_unique_vals("Secondary Expertise")))
+    all_sector_ml    = sorted(set(get_unique_vals("Industry") + get_unique_vals("Secondary Industry")))
+
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        sel_prog = st.multiselect("🎯 Program", options=all_programs_ml,
+                                   placeholder="All", key="ml_prog")
+    with fc2:
+        sel_loc  = st.multiselect("📍 Location", options=all_locations_ml,
+                                   placeholder="All", key="ml_loc")
+    with fc3:
+        sel_exp  = st.multiselect("💼 Expertise", options=all_expertise_ml,
+                                   placeholder="All", key="ml_exp")
+    with fc4:
+        sel_sec  = st.multiselect("🏭 Sector", options=all_sector_ml,
+                                   placeholder="All", key="ml_sec")
+
+    def matches_any(cell_val, selections, sep=","):
+        parts = [p.strip() for p in str(cell_val).split(sep)]
+        return any(sel in parts for sel in selections)
+
+    ml_df = df.copy()
+    if sel_prog:
+        ml_df = ml_df[ml_df["Program"].apply(lambda x: matches_any(x, sel_prog))]
+    if sel_loc:
+        ml_df = ml_df[ml_df["Location"].apply(lambda x: matches_any(x, sel_loc))]
+    if sel_exp:
+        ml_df = ml_df[ml_df.apply(
+            lambda row: matches_any(row.get("Expertise", ""), sel_exp) or
+                        matches_any(row.get("Secondary Expertise", ""), sel_exp), axis=1)]
+    if sel_sec:
+        ml_df = ml_df[ml_df.apply(
+            lambda row: matches_any(row.get("Industry", ""), sel_sec) or
+                        matches_any(row.get("Secondary Industry", ""), sel_sec), axis=1)]
+
+    st.markdown(f"**Total Mentors: {len(ml_df)}**")
+    st.markdown("---")
+
+    display_cols_map = {
+        "Name":                "Mentor Name",
+        "LinkedIn":            "LinkedIn Profile",
+        "Years of Experience": "Yrs of Experience",
+        "Expertise":           "Primary Expertise",
+        "Industry":            "Primary Sector",
     }
-    getattr(st, rec_colors.get(health_rec, "info"))(
-        f"**🏥 Session Health: {health_score}/10** | Recommendation: **{health_rec}**\n\n"
-        f"{health.get('summary', '')}"
-    )
-    st.markdown("---")
+    avail = {k: v for k, v in display_cols_map.items() if k in ml_df.columns}
+    table_df = ml_df[list(avail.keys())].copy()
+    table_df.rename(columns=avail, inplace=True)
 
-    with st.expander("1️⃣ What Was the Ask?", expanded=True):
-        ask = a.get("original_ask", {})
-        st.markdown(f"**{ask.get('summary', 'Not available')}**")
-        conf = ask.get("confidence", "")
-        conf_color = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(conf, "⚪")
-        st.caption(f"Confidence: {conf_color} {conf}")
-
-    with st.expander("2️⃣ Mentor's Expertise", expanded=True):
-        exp = a.get("mentor_expertise", {})
-        st.write(exp.get("summary", "Not available"))
-        fit_val = exp.get("relevant_to_ask", "")
-        getattr(st, {"Yes": "success", "Partial": "warning", "No": "error"}.get(fit_val, "info"))(
-            f"Relevant to Ask: **{fit_val}**"
+    col_cfg = {}
+    if "LinkedIn Profile" in table_df.columns:
+        col_cfg["LinkedIn Profile"] = st.column_config.LinkColumn(
+            "LinkedIn Profile",
+            display_text="🔗 View Profile"
         )
-        demonstrated = exp.get("expertise_demonstrated", [])
-        if demonstrated:
-            st.markdown("**Expertise Demonstrated:**")
-            for item in (demonstrated if isinstance(demonstrated, list) else [demonstrated]):
-                st.markdown(f"• {item}")
 
-    with st.expander("3️⃣ Discussion & Action Items", expanded=True):
-        disc = a.get("session_discussion", {})
-        acts = a.get("actionable_items", {})
-        st.markdown("**Discussion Summary**")
-        st.write(disc.get("summary", "Not available"))
-        topics = disc.get("key_topics", [])
-        if topics:
-            st.markdown("**Key Topics:**")
-            cols_t = st.columns(min(len(topics), 3))
-            for i, topic in enumerate(topics):
-                with cols_t[i % 3]:
-                    st.markdown(
-                        f"<span style='background:#EBF5FB;color:#1A5276;padding:4px 10px;"
-                        f"border-radius:8px;font-size:13px;display:inline-block;margin:2px;'>"
-                        f"📌 {topic}</span>", unsafe_allow_html=True
-                    )
-        st.markdown("---")
-        st.markdown("**✅ Action Items for Venture**")
-        for item in acts.get("for_venture", []):
-            st.markdown(f"☑️ {item}")
-        mentor_acts = [m for m in acts.get("for_mentor", []) if str(m).strip()]
-        if mentor_acts:
-            st.markdown("**🔁 Mentor Follow-up**")
-            for item in mentor_acts:
-                st.markdown(f"☑️ {item}")
-        clarity = acts.get("clarity_score", "")
-        timeline = acts.get("timeline_mentioned", "Not mentioned")
-        clarity_color = {"Clear": "🟢", "Vague": "🟡", "None": "🔴"}.get(clarity, "⚪")
-        st.caption(f"Timeline: {timeline} | Clarity: {clarity_color} {clarity}")
-
-    with st.expander("4️⃣ Engagement Signals", expanded=True):
-        eng = a.get("engagement_signals", {})
-        interest = eng.get("interest_level", "")
-        getattr(st, {"High": "success", "Medium": "warning", "Low": "error"}.get(interest, "info"))(
-            f"Interest Level: **{interest}**"
-        )
-        reconnect = eng.get("wants_to_reconnect", "Unclear")
-        reconnect_ev = eng.get("reconnect_evidence", "Not mentioned")
-        st.markdown(f"**Wants to Reconnect:** {reconnect}")
-        if reconnect_ev and reconnect_ev != "Not mentioned":
-            st.info(f"💬 *\"{reconnect_ev}\"*")
-        for sig in eng.get("signals", []):
-            st.markdown(f"• **{sig.get('signal', '')}**")
-            ref = sig.get("transcript_reference", "")
-            if ref and ref != "Not available from transcript":
-                st.markdown(
-                    f"<blockquote style='border-left:3px solid #3498DB;padding:6px 12px;"
-                    f"background:#EBF5FB;border-radius:4px;font-size:13px;color:#1A5276;'>"
-                    f"📝 <em>{ref}</em></blockquote>", unsafe_allow_html=True
-                )
-
-    with st.expander("5️⃣ Service Request Signals", expanded=True):
-        srv = a.get("service_request_signals", {})
-        if srv.get("detected") == "Yes":
-            st.warning(f"⚠️ **Service Request Detected** — {srv.get('type', 'Unknown')}")
-            st.write(srv.get("details", ""))
-            for sig in srv.get("signals", []):
-                st.markdown(f"• **{sig.get('signal', '')}**")
-                ref = sig.get("transcript_reference", "")
-                if ref and ref != "Not available from transcript":
-                    st.markdown(
-                        f"<blockquote style='border-left:3px solid #E67E22;padding:6px 12px;"
-                        f"background:#FEF9E7;border-radius:4px;font-size:13px;color:#784212;'>"
-                        f"📝 <em>{ref}</em></blockquote>", unsafe_allow_html=True
-                    )
-        else:
-            st.success("✅ No service/paid engagement requests detected.")
-
-    with st.expander("6️⃣ Venture Feedback", expanded=True):
-        fb = a.get("venture_feedback", {})
-        sentiment = fb.get("overall_sentiment", "")
-        getattr(st, {
-            "Very Positive": "success", "Positive": "success",
-            "Neutral": "info", "Mixed": "warning", "Negative": "error"
-        }.get(sentiment, "info"))(f"Overall Sentiment: **{sentiment}**")
-        fb_col1, fb_col2 = st.columns(2)
-        with fb_col1:
-            st.metric("Rating Given", fb.get("rating_mentioned", "Not mentioned"))
-        with fb_col2:
-            st.metric("Follow-up Requested", fb.get("followup_requested", "Unclear"))
-        st.markdown("**Fit Assessment**")
-        st.write(fb.get("fit_assessment", "Not available"))
-        praise = fb.get("specific_praise", "")
-        if praise and praise != "Not available":
-            st.success(f"👍 {praise}")
-        concerns = fb.get("concerns_or_gaps", "")
-        if concerns and concerns != "None mentioned":
-            st.warning(f"⚠️ {concerns}")
-
-    st.markdown("---")
-    export_lines = [
-        "SESSION INTELLIGENCE REPORT", "=" * 50,
-        f"Mentor: {snap.get('mentor', 'N/A')} | Venture: {snap.get('venture', 'N/A')}",
-        f"Date: {snap.get('date') or 'Not specified'} | Type: {snap.get('type', 'N/A')}",
-        "", f"OVERALL HEALTH: {health_score}/10 | Recommendation: {health_rec}",
-        health.get("summary", ""), "",
-        "1. ORIGINAL ASK", a.get("original_ask", {}).get("summary", "N/A"), "",
-        "2. MENTOR EXPERTISE", a.get("mentor_expertise", {}).get("summary", "N/A"),
-        f"Relevant to Ask: {a.get('mentor_expertise', {}).get('relevant_to_ask', 'N/A')}", "",
-        "3. SESSION DISCUSSION", a.get("session_discussion", {}).get("summary", "N/A"),
-        "", "ACTION ITEMS FOR VENTURE:",
-    ]
-    for item in a.get("actionable_items", {}).get("for_venture", []):
-        export_lines.append(f"  - {item}")
-    export_lines += [
-        "", "4. ENGAGEMENT SIGNALS",
-        f"Interest Level: {a.get('engagement_signals', {}).get('interest_level', 'N/A')}",
-        f"Wants to Reconnect: {a.get('engagement_signals', {}).get('wants_to_reconnect', 'N/A')}",
-        "", "5. SERVICE REQUEST SIGNALS",
-        f"Detected: {a.get('service_request_signals', {}).get('detected', 'No')}",
-        a.get("service_request_signals", {}).get("details", ""), "",
-        "6. VENTURE FEEDBACK",
-        f"Sentiment: {a.get('venture_feedback', {}).get('overall_sentiment', 'N/A')}",
-        f"Fit Assessment: {a.get('venture_feedback', {}).get('fit_assessment', 'N/A')}",
-    ]
-    mentor_slug = snap.get("mentor", "mentor").replace(" ", "_")
-    date_slug = (snap.get("date") or "nodateXX").replace(" ", "_")
-    st.download_button(
-        label="📥 Download Report as TXT",
-        data="\n".join(export_lines),
-        file_name=f"session_report_{mentor_slug}_{date_slug}.txt",
-        mime="text/plain",
-        use_container_width=True
+    table_df = table_df.fillna("—").replace({"": "—", "nan": "—", "0": "—"})
+    st.dataframe(
+        table_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=col_cfg,
+        height=600
     )
 
-# ==================== TAB 2: SESSION INTELLIGENCE ====================
-with tab_session:
-    st.markdown("## 🧠 Session Intelligence — Mentor Session Analyser")
-    st.caption(
-        "Reads session asks from the Session Tracker and feedback from the Feedback Tracker. "
-        "Select a mentor and session, then run AI analysis. Upload a transcript for deeper signals."
-    )
-
-    # ── Session state ──
-    if "si_sessions" not in st.session_state:
-        st.session_state.si_sessions = {}   # mentor → [session records]
-    if "si_active_session_id" not in st.session_state:
-        st.session_state.si_active_session_id = None
-    if "si_view_mode" not in st.session_state:
-        st.session_state.si_view_mode = "select_session"   # "select_session" | "view_session"
-    if "si_tracker_url" not in st.session_state:
-        st.session_state.si_tracker_url = st.secrets.get(
-            "GITHUB_SESSION_TRACKER_URL",
-            "https://raw.githubusercontent.com/meenusaun/mentor-search-ai/main/05_Session_Management_Tracker.xlsx"
-        )
-    if "si_feedback_url" not in st.session_state:
-        st.session_state.si_feedback_url = st.secrets.get(
-            "GITHUB_FEEDBACK_TRACKER_URL",
-            "https://raw.githubusercontent.com/meenusaun/mentor-search-ai/main/06_Feedback_Quality_Tracker.xlsx"
-        )
-
-    # ── GitHub URL config (collapsible) ──
-    with st.expander("⚙️ Data Source Configuration — Set your GitHub URLs here", expanded=True):
-        st.caption("Replace **YOUR_REPO_NAME** with your actual GitHub repository name. Your username is already filled in as `meenusaun`.")
-        st.info(
-            "👆 Your GitHub username is **meenusaun**. "
-            "Just replace `YOUR_REPO_NAME` in both URLs below with your repository name, "
-            "then click **💾 Save URLs**."
-        )
-        url_col1, url_col2 = st.columns(2)
-        with url_col1:
-            new_tracker_url = st.text_input(
-                "Session Tracker URL (GitHub raw)",
-                value=st.session_state.si_tracker_url,
-                key="si_tracker_url_input"
-            )
-        with url_col2:
-            new_feedback_url = st.text_input(
-                "Feedback Tracker URL (GitHub raw)",
-                value=st.session_state.si_feedback_url,
-                key="si_feedback_url_input"
-            )
-        cfg_col1, cfg_col2 = st.columns(2)
-        with cfg_col1:
-            if st.button("💾 Save URLs", key="si_save_urls"):
-                st.session_state.si_tracker_url = new_tracker_url
-                st.session_state.si_feedback_url = new_feedback_url
-                load_session_tracker.clear()
-                load_feedback_tracker.clear()
-                st.success("URLs saved. Data will reload on next action.")
-        with cfg_col2:
-            if st.button("🔄 Force Reload Data", key="si_reload_data"):
-                load_session_tracker.clear()
-                load_feedback_tracker.clear()
-                st.rerun()
-
-    # ── Load tracker data ──
-    df_tracker, tracker_err = load_session_tracker(st.session_state.si_tracker_url)
-    df_feedback, feedback_err = load_feedback_tracker(st.session_state.si_feedback_url)
-
-    tracker_loaded = not df_tracker.empty
-    feedback_loaded = not df_feedback.empty
-
-    # Show load status inline (compact)
-    status_col1, status_col2 = st.columns(2)
-    with status_col1:
-        if tracker_loaded:
-            st.success(f"✅ Session Tracker — {len(df_tracker)} sessions loaded")
-        else:
-            st.error(f"❌ Session Tracker — {tracker_err or 'Failed to load'}")
-    with status_col2:
-        if feedback_loaded:
-            st.success(f"✅ Feedback Tracker — {len(df_feedback)} feedback records loaded")
-        else:
-            st.warning(f"⚠️ Feedback Tracker — {feedback_err or 'Failed to load'} (analysis can still run)")
-
-    if not tracker_loaded:
-        st.info("👆 Configure your GitHub URLs above and click **Force Reload Data** to get started.")
-        st.stop()
-
-    # ── Merge session + feedback on Feedback ID = Respondent ID ──
-    df_merged = merge_session_feedback(df_tracker, df_feedback)
-
-    # ── Build mentor list from tracker ──
-    tracker_mentors = sorted([
-        m for m in df_tracker["Mentor Name"].dropna().unique()
-        if str(m).strip() and str(m).strip().lower() not in ("nan", "none", "")
-    ])
-
-    # ═══════════════════════════════════════════════════════════
-    # LAYOUT: Left panel (mentor + session list) | Right panel (detail)
-    # ═══════════════════════════════════════════════════════════
-    si_left, si_right = st.columns([1, 2.4])
-
-    with si_left:
-        st.markdown("### 👤 Select Mentor")
-        selected_mentor = st.selectbox(
-            "Mentor",
-            options=["— Select a mentor —"] + tracker_mentors,
-            key="si_selected_mentor",
-            label_visibility="collapsed"
-        )
-
-        if selected_mentor and selected_mentor != "— Select a mentor —":
-            # Sessions for this mentor from the tracker
-            mentor_rows = df_merged[
-                df_merged["Mentor Name"].str.strip() == selected_mentor
-            ].copy()
-
-            st.markdown("---")
-            n_total = len(mentor_rows)
-            n_completed = len(mentor_rows[mentor_rows["Session Status"].str.lower() == "completed"])
-            n_feedback = len(mentor_rows[mentor_rows["Feedback ID"].str.strip().replace("0", "") != ""])
-
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Total", n_total)
-            m2.metric("Done", n_completed)
-            m3.metric("Feedback", n_feedback)
-
-            st.markdown(f"#### 📂 Sessions")
-
-            if mentor_rows.empty:
-                st.caption("No sessions found for this mentor.")
-            else:
-                for idx_r, row in mentor_rows.iterrows():
-                    sid = row.get("Meeting ID", str(idx_r))
-                    venture = row.get("Venture Name", "Unknown")
-                    date_raw = row.get("Meeting Date", "")
-                    try:
-                        date_str = pd.to_datetime(date_raw).strftime("%d %b %Y") if date_raw and date_raw != "" else ""
-                    except Exception:
-                        date_str = str(date_raw)[:10] if date_raw else ""
-
-                    status = row.get("Session Status", "")
-                    status_icon = {"completed": "✅", "scheduled": "📅", "cancelled": "❌"}.get(
-                        status.lower(), "⬜"
-                    )
-                    has_feedback = row.get("Feedback ID", "").strip() not in ("", "0")
-                    fb_icon = "💬" if has_feedback else ""
-
-                    # Check if we have saved AI analysis for this session
-                    saved = st.session_state.si_sessions.get(selected_mentor, {}).get(sid)
-                    ai_icon = "🧠" if saved and saved.get("analysis") else ""
-
-                    is_active = st.session_state.si_active_session_id == sid
-                    btn_label = f"{status_icon}{fb_icon}{ai_icon} {sid} — {venture[:22]}"
-                    if date_str:
-                        btn_label += f"\n{date_str}"
-
-                    if st.button(
-                        btn_label,
-                        key=f"si_sess_btn_{idx_r}",
-                        use_container_width=True,
-                        type="primary" if is_active else "secondary"
-                    ):
-                        st.session_state.si_active_session_id = sid
-                        st.session_state.si_view_mode = "view_session"
-                        st.rerun()
-
-                st.caption("✅ Completed · 💬 Has Feedback · 🧠 AI Analysed")
-
-    # ── Right panel ──
-    with si_right:
-
-        if not selected_mentor or selected_mentor == "— Select a mentor —":
-            st.info("👈 Select a mentor from the left panel to see their sessions.")
-
-        elif st.session_state.si_view_mode == "view_session" and st.session_state.si_active_session_id:
-            sid = st.session_state.si_active_session_id
-            mentor_rows = df_merged[
-                df_merged["Mentor Name"].str.strip() == selected_mentor
-            ]
-            row_match = mentor_rows[mentor_rows["Meeting ID"] == sid]
-
-            if row_match.empty:
-                st.warning("Session not found in tracker.")
-            else:
-                row = row_match.iloc[0]
-
-                # ── Pull fields from tracker ──
-                venture       = row.get("Venture Name", "")
-                date_raw      = row.get("Meeting Date", "")
-                try:
-                    date_str = pd.to_datetime(date_raw).strftime("%d %b %Y") if date_raw and date_raw != "" else ""
-                except Exception:
-                    date_str = str(date_raw)[:10] if date_raw else ""
-
-                session_type  = row.get("Session Type", "")
-                ask_text      = row.get("Ask", "")
-                summary_text  = row.get("Meeting Summary", "")
-                next_steps    = row.get("Next Steps / Action Items", "")
-                followup_req  = row.get("Follow-Up Required?", "")
-                hub           = row.get("Hub", "")
-                prog_tier     = row.get("Program Tier", "")
-                status        = row.get("Session Status", "")
-                tracker_rating = row.get("Feedback Rating (1-5)", "")
-                tracker_fb_comment = row.get("Feedback Comments", "")
-
-                # ── Pull feedback fields (fb_ prefix from merge) ──
-                fb_verbatim   = row.get("fb_Verbatim Feedback", "")
-                fb_rating     = row.get("fb_Overall Rating (1-5)", "")
-                fb_useful     = row.get("fb_How useful was this mentor session for your current business priorities?", "")
-                fb_actionable = row.get("fb_Actionability of Advice", "")
-                fb_followup   = row.get("fb_Follow-Up Requested?", "")
-                fb_flagged    = row.get("fb_Flagged (≤3)?", "")
-                fb_category   = row.get("fb_Response Category", "")
-
-                has_feedback  = str(row.get("Feedback ID", "")).strip() not in ("", "0")
-
-                # ── Header ──
-                st.markdown(f"### 📋 {sid} — {venture}")
-                hdr_col1, hdr_col2, hdr_col3, hdr_col4 = st.columns(4)
-                hdr_col1.caption(f"📅 {date_str or 'Date TBD'}")
-                hdr_col2.caption(f"🏷️ {session_type}")
-                hdr_col3.caption(f"🏢 {hub}")
-                hdr_col4.caption(f"📊 {status}")
-
-                st.markdown("---")
-
-                # ── 2-column detail view ──
-                det_left, det_right = st.columns(2)
-
-                with det_left:
-                    st.markdown("#### 🎯 Original Ask")
-                    if ask_text and ask_text not in ("", "nan"):
-                        st.info(ask_text)
-                    else:
-                        st.caption("*No ask recorded in tracker*")
-
-                    st.markdown("#### 📝 Meeting Summary")
-                    if summary_text and summary_text not in ("", "nan"):
-                        st.write(summary_text)
-                    else:
-                        st.caption("*No summary recorded*")
-
-                    st.markdown("#### ✅ Next Steps / Action Items")
-                    if next_steps and next_steps not in ("", "nan"):
-                        for line in next_steps.split("\n"):
-                            if line.strip():
-                                st.markdown(f"☑️ {line.strip()}")
-                    else:
-                        st.caption("*No action items recorded*")
-
-                    if followup_req and followup_req not in ("", "nan"):
-                        st.markdown(f"**Follow-Up Required:** {followup_req}")
-
-                with det_right:
-                    st.markdown("#### 💬 Venture Feedback")
-                    if has_feedback:
-                        # Rating row
-                        if fb_rating and fb_rating not in ("", "nan"):
-                            try:
-                                rating_val = float(fb_rating)
-                                stars = "⭐" * int(rating_val)
-                                st.markdown(f"**Rating:** {stars} **{fb_rating} / 5**")
-                            except Exception:
-                                st.markdown(f"**Rating:** {fb_rating}")
-
-                        if fb_flagged and fb_flagged.lower() == "yes":
-                            st.error(f"🚨 Flagged (Rating ≤ 3) | Category: {fb_category or 'N/A'}")
-
-                        if fb_useful and fb_useful not in ("", "nan"):
-                            st.markdown(f"**Session Usefulness:** {fb_useful}")
-                        if fb_actionable and fb_actionable not in ("", "nan"):
-                            st.markdown(f"**Actionability:** {fb_actionable}")
-                        if fb_followup and fb_followup not in ("", "nan"):
-                            st.markdown(f"**Follow-Up Requested:** {fb_followup}")
-
-                        if fb_verbatim and fb_verbatim not in ("", "nan"):
-                            st.markdown("**Verbatim Feedback:**")
-                            st.markdown(
-                                "<blockquote style='border-left:4px solid #2E86C1;"
-                                "padding:8px 14px;background:#EBF5FB;border-radius:6px;"
-                                "font-size:14px;color:#1B2631;font-style:italic;'>&ldquo;"
-                                + str(fb_verbatim) + "&rdquo;</blockquote>",
-                                unsafe_allow_html=True
-                            )
-                    else:
-                        st.caption("*No feedback linked to this session*")
-                        if tracker_rating and tracker_rating not in ("", "nan", "0"):
-                            st.markdown(f"**Tracker Rating:** {tracker_rating}")
-                        if tracker_fb_comment and tracker_fb_comment not in ("", "nan"):
-                            st.markdown(f"**Tracker Comments:** {tracker_fb_comment}")
-
-                st.markdown("---")
-
-                # ── AI Analysis section ──
-                st.markdown("#### 🧠 AI Session Analysis")
-
-                saved_record = st.session_state.si_sessions.get(
-                    selected_mentor, {}
-                ).get(sid)
-
-                if saved_record and saved_record.get("analysis"):
-                    st.caption("AI analysis loaded from memory.")
-                    _render_session_analysis(
-                        saved_record["analysis"],
-                        {"mentor": selected_mentor, "venture": venture,
-                         "date": date_str, "type": session_type},
-                        selected_mentor
-                    )
-                    if st.button("🔁 Re-run Analysis", key="si_rerun_btn"):
-                        if selected_mentor not in st.session_state.si_sessions:
-                            st.session_state.si_sessions[selected_mentor] = {}
-                        st.session_state.si_sessions[selected_mentor].pop(sid, None)
-                        st.rerun()
-                else:
-                    # Upload transcript
-                    si_transcript_file = st.file_uploader(
-                        "📄 Upload Transcript (optional — PDF, DOCX, TXT)",
-                        type=["pdf", "docx", "txt"],
-                        key=f"si_transcript_{sid}"
-                    )
-                    si_transcript_text = ""
-                    if si_transcript_file:
-                        si_transcript_text = extract_text_from_uploaded_file(si_transcript_file)
-                        if si_transcript_text:
-                            st.success(f"✅ Transcript parsed — {len(si_transcript_text.split())} words")
-                        else:
-                            st.warning("⚠️ Could not extract text.")
-
-                    extra_notes = st.text_area(
-                        "Additional notes (optional)",
-                        height=80,
-                        key=f"si_extra_{sid}",
-                        placeholder="Any extra context you want the AI to consider..."
-                    )
-
-                    if st.button("🚀 Run AI Analysis", type="primary",
-                                 use_container_width=True, key=f"si_analyze_{sid}"):
-
-                        # Build context from tracker + feedback + optional transcript
-                        context_parts = [
-                            f"MENTOR NAME: {selected_mentor}",
-                            f"VENTURE NAME: {venture}",
-                            f"SESSION TYPE: {session_type}",
-                            f"PROGRAM TIER: {prog_tier}",
-                            f"HUB: {hub}",
-                        ]
-                        if date_str:
-                            context_parts.append(f"SESSION DATE: {date_str}")
-                        if ask_text and ask_text not in ("", "nan"):
-                            context_parts.append(f"\nORIGINAL ASK (from Session Tracker):\n{ask_text}")
-                        if summary_text and summary_text not in ("", "nan"):
-                            context_parts.append(f"\nMEETING SUMMARY (from Session Tracker):\n{summary_text}")
-                        if next_steps and next_steps not in ("", "nan"):
-                            context_parts.append(f"\nNEXT STEPS / ACTION ITEMS (from Session Tracker):\n{next_steps}")
-                        if has_feedback:
-                            fb_block = f"\nVENTURE FEEDBACK (from Feedback Tracker):"
-                            if fb_rating:
-                                fb_block += f"\nRating: {fb_rating}/5"
-                            if fb_useful:
-                                fb_block += f"\nSession Usefulness: {fb_useful}"
-                            if fb_actionable:
-                                fb_block += f"\nActionability of Advice: {fb_actionable}"
-                            if fb_followup:
-                                fb_block += f"\nFollow-Up Requested: {fb_followup}"
-                            if fb_verbatim:
-                                fb_block += f"\nVerbatim Feedback: {fb_verbatim}"
-                            if fb_flagged.lower() == "yes":
-                                fb_block += f"\nFLAGGED (Low Rating): Yes — Category: {fb_category}"
-                            context_parts.append(fb_block)
-                        if si_transcript_text:
-                            context_parts.append(
-                                f"\nSESSION TRANSCRIPT:\n{si_transcript_text[:12000]}"
-                            )
-                        if extra_notes and extra_notes.strip():
-                            context_parts.append(f"\nADDITIONAL NOTES:\n{extra_notes}")
-
-                        full_context = "\n\n".join(context_parts)
-
-                        si_prompt = f"""You are an expert program analyst for a startup accelerator's Resources Network team.
-You have been given structured data about a mentor-venture session from the program's trackers, plus optional transcript.
-Analyse everything carefully and return a structured JSON response.
-
-SESSION DATA:
-{full_context}
-
-Note: "Original Ask", "Meeting Summary", "Next Steps", and "Venture Feedback" come directly from the program's tracking system.
-Use these as ground truth. The transcript (if provided) may add deeper signals, direct quotes, and context.
-
-Return ONLY a valid JSON object with exactly these keys:
-
-{{
-  "original_ask": {{
-    "summary": "Restate the ask clearly in 2-3 sentences based on the tracker data and any transcript context.",
-    "confidence": "High / Medium / Low — how clearly was the ask articulated"
-  }},
-  "mentor_expertise": {{
-    "summary": "What expertise of the mentor was relevant and demonstrated in this session? 2-3 sentences.",
-    "relevant_to_ask": "Yes / Partial / No",
-    "expertise_demonstrated": ["area 1", "area 2", "area 3"]
-  }},
-  "session_discussion": {{
-    "summary": "What was actually discussed? 3-5 sentences. Draw from meeting summary and transcript.",
-    "key_topics": ["topic 1", "topic 2", "topic 3"],
-    "actionable_outcome": "Yes / No"
-  }},
-  "actionable_items": {{
-    "for_venture": ["action 1 from next steps or transcript", "action 2"],
-    "for_mentor": ["mentor follow-up if any"],
-    "timeline_mentioned": "Any deadline or 'Not mentioned'",
-    "clarity_score": "Clear / Vague / None"
-  }},
-  "engagement_signals": {{
-    "interest_level": "High / Medium / Low",
-    "signals": [
-      {{
-        "signal": "Signal observed — from feedback, tracker notes, or transcript",
-        "transcript_reference": "Direct quote if from transcript, else 'From tracker/feedback data'"
-      }}
-    ],
-    "wants_to_reconnect": "Yes / Likely / No / Unclear",
-    "reconnect_evidence": "Evidence from feedback or transcript, or 'Not mentioned'"
-  }},
-  "service_request_signals": {{
-    "detected": "Yes / No",
-    "type": "Advisory / Paid Service / Partnership / Hiring / Investment / Not detected",
-    "details": "Details or 'None detected'",
-    "signals": [
-      {{
-        "signal": "Signal description",
-        "transcript_reference": "Quote or source, or 'Not available'"
-      }}
-    ]
-  }},
-  "venture_feedback": {{
-    "overall_sentiment": "Very Positive / Positive / Neutral / Mixed / Negative",
-    "rating_mentioned": "Exact rating from feedback tracker or 'Not mentioned'",
-    "fit_assessment": "How well did the mentor fit the need? Draw from verbatim feedback.",
-    "specific_praise": "What the venture appreciated (from verbatim feedback), or 'Not available'",
-    "concerns_or_gaps": "Concerns or gaps (from verbatim feedback or flags), or 'None mentioned'",
-    "followup_requested": "Yes / No / Unclear — from feedback tracker field"
-  }},
-  "overall_session_health": {{
-    "score": "Score out of 10 as number only",
-    "summary": "2-3 sentence overall assessment drawing on all available data.",
-    "recommendation": "Continue / Reconnect / Try Different Mentor / Needs Follow-up"
-  }}
-}}
-
-Return ONLY the JSON object. No markdown, no extra text.
-"""
-                        with st.spinner("Running AI analysis..."):
-                            try:
-                                raw_response = call_ai(si_prompt, max_tokens=3000)
-                                cleaned_response = re.sub(r"```json|```", "", raw_response).strip()
-                                try:
-                                    analysis = json.loads(cleaned_response)
-                                except json.JSONDecodeError:
-                                    match_obj = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
-                                    analysis = json.loads(match_obj.group()) if match_obj else None
-
-                                if analysis:
-                                    if selected_mentor not in st.session_state.si_sessions:
-                                        st.session_state.si_sessions[selected_mentor] = {}
-                                    st.session_state.si_sessions[selected_mentor][sid] = {
-                                        "analysis": analysis,
-                                        "transcript_uploaded": bool(si_transcript_text),
-                                        "analysed_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
-                                    }
-                                    st.rerun()
-                                else:
-                                    st.error("Could not parse AI response. Please try again.")
-                            except Exception as e:
-                                st.error(f"Analysis error: {e}")
-
-        else:
-            # No session selected yet
-            if selected_mentor and selected_mentor != "— Select a mentor —":
-                mentor_rows = df_merged[df_merged["Mentor Name"].str.strip() == selected_mentor]
-                if not mentor_rows.empty:
-                    st.info(f"👈 Select a session from the left panel to view details and run AI analysis.")
-                    st.markdown(f"**{selected_mentor}** has **{len(mentor_rows)}** session(s) in the tracker.")
-                    completed = mentor_rows[mentor_rows["Session Status"].str.lower() == "completed"]
-                    if not completed.empty:
-                        st.markdown(f"**{len(completed)}** completed · "
-                                    f"**{len(mentor_rows[mentor_rows['Feedback ID'].str.strip().replace('0','') != ''])}** with feedback")
-
-
-
-# ==================== TAB 1: EXPERT SEARCH ====================
-with tab_search:
-
+with tab1:
     # ------------------ RENDER CHAT HISTORY ------------------
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
