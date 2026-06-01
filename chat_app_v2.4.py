@@ -24,6 +24,28 @@ st.set_page_config(
     layout="wide"
 )
 
+# ------------------ PASSWORD PROTECTION ------------------
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    st.markdown("### 🔒 Please enter the password to continue")
+    pwd = st.text_input("Password", type="password", key="login_pwd")
+    if st.button("Login"):
+        if pwd == st.secrets["APP_PASSWORD"]:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("❌ Incorrect password. Please try again.")
+    return False
+
+if not check_password():
+    st.stop()
+
+# ------------------ APP ------------------
 col1, col2, col3 = st.columns([1, 2, 1])
 with col1:
     st.image("DP_BG1.png", width=150)
