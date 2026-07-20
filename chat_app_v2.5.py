@@ -1,4 +1,5 @@
 import streamlit as st
+import traceback
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -635,11 +636,9 @@ def run_search(query, source_df, source_vectors):
 
         expert_info += f"""
 Name: {row['Name']}
-Primary Expertise: {r('p. Expertise')}
-Secondary Expertise: {r('S. Expertise')}
-Industry (Combined): {r('Industry')}
-Primary Industry: {r('p. Industry')}
-Secondary Industry: {r('s. Industry')}
+Expertise: {r('Expertise')}
+Secondary Expertise: {r('Secondary Expertise')}
+Industry: {r('Industry')}
 Active Industry Sectors: {active_sectors if active_sectors else 'Not specified'}
 Current Designation: {r('Current Designation')}
 Current Organization: {r('Current Organization')}
@@ -1119,6 +1118,9 @@ with tab1:
                             st.rerun()
 
                     except Exception as e:
+                        import traceback
+                        print("❌ SEARCH ERROR:", traceback.format_exc())
+                        st.error(f"Debug — actual error: {e}")
                         st.session_state.pending_retry = True
                         st.session_state.retry_query = user_input
                         retry_msg = (
