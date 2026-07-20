@@ -635,9 +635,11 @@ def run_search(query, source_df, source_vectors):
 
         expert_info += f"""
 Name: {row['Name']}
-Expertise: {r('Expertise')}
-Secondary Expertise: {r('Secondary Expertise')}
-Industry: {r('Industry')}
+Primary Expertise: {r('p. Expertise')}
+Secondary Expertise: {r('S. Expertise')}
+Industry (Combined): {r('Industry')}
+Primary Industry: {r('p. Industry')}
+Secondary Industry: {r('s. Industry')}
 Active Industry Sectors: {active_sectors if active_sectors else 'Not specified'}
 Current Designation: {r('Current Designation')}
 Current Organization: {r('Current Organization')}
