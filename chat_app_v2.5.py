@@ -24,28 +24,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# ------------------ PASSWORD PROTECTION ------------------
-def check_password():
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-
-    if st.session_state.authenticated:
-        return True
-
-    st.markdown("### 🔒 Please enter the password to continue")
-    pwd = st.text_input("Password", type="password", key="login_pwd")
-    if st.button("Login"):
-        if pwd == st.secrets["APP_PASSWORD"]:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("❌ Incorrect password. Please try again.")
-    return False
-
-if not check_password():
-    st.stop()
-
-# ------------------ APP ------------------
 col1, col2, col3 = st.columns([1, 2, 1])
 with col1:
     st.image("DP_BG1.png", width=150)
@@ -937,7 +915,7 @@ with tab2:
 
 with tab1:
     # ------------------ RENDER CHAT HISTORY ------------------
-    for message in st.session_state.messages:
+    for msg_idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             if message.get("type") == "recommendations":
                 st.markdown(message["summary"])
@@ -949,7 +927,7 @@ with tab1:
                 if message == st.session_state.messages[-1] and st.session_state.pending_retry:
                     col_yes, col_no, col_gap = st.columns([1, 1, 4])
                     with col_yes:
-                        if st.button("✅ Yes, retry", key="retry_yes"):
+                        if st.button("✅ Yes, retry", key=f"retry_yes_{msg_idx}"):
                             retry_q = st.session_state.retry_query
                             st.session_state.pending_retry = False
                             st.session_state.messages.append({"role": "user", "content": "Yes"})
@@ -974,7 +952,7 @@ with tab1:
                                     })
                             st.rerun()
                     with col_no:
-                        if st.button("❌ No, cancel", key="retry_no"):
+                        if st.button("❌ No, cancel", key=f"retry_no_{msg_idx}"):
                             st.session_state.pending_retry = False
                             st.session_state.retry_query = ""
                             st.session_state.messages.append({
