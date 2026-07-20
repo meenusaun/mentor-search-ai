@@ -166,8 +166,8 @@ def load_data():
     )
 
     required_cols = [
-        "Expertise", "Secondary Expertise", "Industry", "Secondary Industry",
-        "Description", "Expertise Tags", "Industry Tags",
+        "p. Expertise", "S. Expertise", "p. Industry", "s. Industry",
+        "Description", "Expertise", "Industry",
         "Document Path", "LinkedIn", "Qualification",
         "Current Organization", "Current Designation",
         "Program", "Years of Experience", "Location",
@@ -216,13 +216,14 @@ def load_data():
         return df[name] if name in df.columns else ""
 
     df["combined"] = (
-        "Expertise: " + col("Expertise") + ". " +
-        "Secondary Expertise: " + col("Secondary Expertise") + ". " +
+        "Primary Expertise: " + col("p. Expertise") + ". " +
+        "Secondary Expertise: " + col("S. Expertise") + ". " +
         "Industry: " + col("Industry") + ". " +
-        "Secondary Industry: " + col("Secondary Industry") + ". " +
+        "Primary Industry: " + col("p. Industry") + ". " +
+        "Secondary Industry: " + col("s. Industry") + ". " +
         "Active Industry Sectors: " + col("Active Industries") + ". " +
         "Description: " + col("Description") + ". " +
-        "Tags: " + col("Expertise Tags") + " " + col("Industry Tags") + ". " +
+        
         "Qualification: " + col("Qualification") + ". " +
         "Current Organization: " + col("Current Organization") + ". " +
         "Current Designation: " + col("Current Designation") + ". " +
@@ -683,7 +684,7 @@ NEW DATA AVAILABLE — USE THESE FIELDS FOR STRONGER MATCHING:
   is MOST qualified to advise on from direct experience. If this aligns with the
   founder's problem → strong signal for Tier 1.
 - "Active Industry Sectors": Checkbox-based sectors the expert has worked in.
-  Use this alongside "Industry" for industry matching.
+  Use this alongside "p. Industry" and "s. Industry" for industry matching.
 - "Revenue Stage Expertise": The revenue stage the expert understands best from
   the inside. Match this to where the founder's business is.
 - "Growth Ceiling Story": A real example of how the expert helped a business
@@ -789,7 +790,7 @@ Return only the JSON array. No extra text, no markdown outside the array.
                 "Hands On Score": "1 | Limited operator experience confirmed for this requirement",
                 "Expertise Score": "1 | Some relevant expertise may apply",
                 "Credibility Score": "1 | Profile available for review",
-                "Core Expertise": row.get("Expertise", "Not specified"),
+                "Core Expertise": row.get("p. Expertise", "Not specified"),
                 "Match Reason": (
                     "No strong match found for this requirement. "
                     "This expert is the closest available in the network based on semantic similarity. "
@@ -875,13 +876,13 @@ with tab2:
 
     if exp_search.strip():
         ml_df = ml_df[ml_df.apply(
-            lambda row: contains_text(row.get("Expertise", ""), exp_search) or
-                        contains_text(row.get("Secondary Expertise", ""), exp_search), axis=1)]
+            lambda row: contains_text(row.get("p. Expertise", ""), exp_search) or
+                        contains_text(row.get("S. Expertise", ""), exp_search), axis=1)]
 
     if sec_search.strip():
         ml_df = ml_df[ml_df.apply(
-            lambda row: contains_text(row.get("Industry", ""), sec_search) or
-                        contains_text(row.get("Secondary Industry", ""), sec_search), axis=1)]
+            lambda row: contains_text(row.get("p. Industry", ""), sec_search) or
+                        contains_text(row.get("s. Industry", ""), sec_search), axis=1)]
 
     st.markdown(f"**Total Mentors: {len(ml_df)}**")
     st.markdown("---")
@@ -890,8 +891,8 @@ with tab2:
         "Name":                "Mentor Name",
         "LinkedIn":            "LinkedIn Profile",
         "Years of Experience": "Yrs of Experience",
-        "Expertise":           "Primary Expertise",
-        "Industry":            "Primary Sector",
+        "p. Expertise":        "Primary Expertise",
+        "p. Industry":         "Primary Sector",
     }
     avail = {k: v for k, v in display_cols_map.items() if k in ml_df.columns}
     table_df = ml_df[list(avail.keys())].copy()
